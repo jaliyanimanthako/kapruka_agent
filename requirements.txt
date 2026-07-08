@@ -4,3 +4,5 @@ markdownify
 supabase
 qdrant-client
 sqlalchemy
+openai
+psycopg2-binary

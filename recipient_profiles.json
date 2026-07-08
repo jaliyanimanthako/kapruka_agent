@@ -1,0 +1,14 @@
+{
+  "wife": {
+    "recipient_id": "wife",
+    "name": "Wife",
+    "relationship": "spouse",
+    "preferences": [
+      "Loves dark chocolate",
+      "Loves elegant packaging",
+      "Likes white chocaltaes"
+    ],
+    "notes": [],
+    "updated_at": 1783501965.744801
+  }
+}

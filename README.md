@@ -50,15 +50,104 @@ SUPABASE_DB_URL=
 QDRANT_URL=
 QDRANT_API_KEY=
 QDRANT_COLLECTION_NAME=kapruka_catalog
-EMBEDDING_DIM=128
+OPENAI_API_KEY=
+OPENAI_CHAT_MODEL=gpt-4o-mini
+OPENAI_CHAT_TEMPERATURE=0.2
+OPENAI_CHAT_MAX_TOKENS=500
+EMBEDDING_PROVIDER=openai
+EMBEDDING_MODEL=text-embedding-3-small
+EMBEDDING_DIM=1536
 ST_MAX_TURNS=20
 ST_TTL_SECONDS=86400
 ```
 
 If Supabase or Qdrant are not configured yet, the project still imports and tests cleanly.
 
+If you switch from the hash fallback to real OpenAI embeddings, make sure the
+Qdrant collection dimension matches the embedding model. For
+`text-embedding-3-small`, use `EMBEDDING_DIM=1536` and recreate the
+`kapruka_catalog` collection if it was previously created with a different size.
+
 ## Tests
 
 ```bash
 ./.venv/bin/python -m unittest test_web_crawler.py test_memory.py
 ```
+
+## End-to-End Demo
+
+Run the three memory tiers together:
+
+```bash
+./.venv/bin/python -m memory.demo_stack \
+  --query "gift for wife" \
+  --turn "I need a romantic anniversary gift" \
+  --preference "Loves dark chocolate" \
+  --note "Prefers elegant packaging"
+```
+
+This will:
+
+- store the latest turn in short-term memory
+- save recipient preferences in the semantic profile store
+- search the Qdrant-backed catalog using the combined memory context
+
+## LLM + Memory
+
+Run one query through all three memory layers and then send the assembled
+context to the LLM:
+
+```bash
+./.venv/bin/python -m memory.ask_with_memory \
+  --query "gift for wife" \
+  --turn "I need a romantic anniversary gift" \
+  --preference "Loves dark chocolate" \
+  --note "Prefers elegant packaging" \
+  --sync-catalog
+```
+
+This prints:
+
+- the short-term conversation turns used
+- the semantic recipient profile used
+- the long-term Qdrant catalog matches used
+- the final LLM answer
+
+If you already ingested `catalog.json` into Qdrant, omit `--sync-catalog` so the
+command does not re-embed and upsert the full catalog on every query.
+
+## Part 3: Specialist orchestration
+
+The specialist layer is implemented under `src/agents/`.
+
+- Router: `src/agents/router.py`
+- Catalog specialist: `src/agents/catalog_agent.py`
+- Logistics specialist: `src/agents/logistics_agent.py`
+- Orchestrator: `src/agents/orchestrator.py`
+
+Run a single routed query:
+
+```bash
+./.venv/bin/python -m agents.demo_orchestrator \
+  --query "gift for wife"
+```
+
+Run a logistics query:
+
+```bash
+./.venv/bin/python -m agents.demo_orchestrator \
+  --query "Can you deliver this to Colombo today?"
+```
+
+Run a preference update:
+
+```bash
+./.venv/bin/python -m agents.demo_orchestrator \
+  --query "Remember that my wife loves dark chocolate"
+```
+
+The demo prints:
+
+- the route decision from the router
+- the specialist output
+- the final answer returned by the orchestrator

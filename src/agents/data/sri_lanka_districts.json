@@ -1,0 +1,29 @@
+{
+  "districts": [
+    {"name": "Ampara", "aliases": ["ampara"]},
+    {"name": "Anuradhapura", "aliases": ["anuradhapura"]},
+    {"name": "Badulla", "aliases": ["badulla"]},
+    {"name": "Batticaloa", "aliases": ["batticaloa"]},
+    {"name": "Colombo", "aliases": ["colombo", "dehiwala", "mount lavinia", "mt lavinia", "moratuwa", "maharagama", "nugegoda", "battaramulla", "kotte", "rajagiriya", "piliyandala", "wellawatte", "borella"]},
+    {"name": "Galle", "aliases": ["galle", "hikkaduwa", "ambalangoda", "elpitiya"]},
+    {"name": "Gampaha", "aliases": ["gampaha", "kelaniya", "kiribathgoda", "kadawatha", "wattala", "ragama", "ja-ela", "jaela", "negombo", "minuwangoda"]},
+    {"name": "Hambantota", "aliases": ["hambantota"]},
+    {"name": "Jaffna", "aliases": ["jaffna"]},
+    {"name": "Kalutara", "aliases": ["kalutara", "panadura", "horana", "beruwala", "wadduwa"]},
+    {"name": "Kandy", "aliases": ["kandy", "peradeniya", "katugastota", "gampola"]},
+    {"name": "Kegalle", "aliases": ["kegalle"]},
+    {"name": "Kilinochchi", "aliases": ["kilinochchi"]},
+    {"name": "Kurunegala", "aliases": ["kurunegala", "kuliyapitiya"]},
+    {"name": "Mannar", "aliases": ["mannar"]},
+    {"name": "Matale", "aliases": ["matale"]},
+    {"name": "Matara", "aliases": ["matara", "weligama"]},
+    {"name": "Monaragala", "aliases": ["monaragala"]},
+    {"name": "Mullaitivu", "aliases": ["mullaitivu"]},
+    {"name": "Nuwara Eliya", "aliases": ["nuwara eliya", "nuwaraeliya"]},
+    {"name": "Polonnaruwa", "aliases": ["polonnaruwa"]},
+    {"name": "Puttalam", "aliases": ["puttalam"]},
+    {"name": "Ratnapura", "aliases": ["ratnapura"]},
+    {"name": "Trincomalee", "aliases": ["trincomalee"]},
+    {"name": "Vavuniya", "aliases": ["vavuniya"]}
+  ]
+}

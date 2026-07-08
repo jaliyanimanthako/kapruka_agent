@@ -24,13 +24,13 @@ class ShortTermMemoryStore:
         self.max_turns = max_turns
         self.ttl_seconds = ttl_seconds
         self._use_database = bool(SUPABASE_DB_URL) if use_database is None else use_database
+        self._db_ready = False
         self._local_store: Dict[Tuple[str, str], Deque[ConversationTurn]] = defaultdict(deque)
-
-        if self._use_database:
-            create_tables()
 
     def append(self, turn: ConversationTurn) -> None:
         """Append one turn into short-term memory."""
+        if self._use_database:
+            self._ensure_database_ready()
         if self._use_database:
             self._append_db(turn)
             return
@@ -39,11 +39,15 @@ class ShortTermMemoryStore:
     def recent(self, user_id: str, session_id: str, k: int = 6) -> List[ConversationTurn]:
         """Return recent turns for the given user session."""
         if self._use_database:
+            self._ensure_database_ready()
+        if self._use_database:
             return self._recent_db(user_id, session_id, k)
         return self._recent_local(user_id, session_id, k)
 
     def clear(self, user_id: str, session_id: str) -> None:
         """Remove all short-term turns for a session."""
+        if self._use_database:
+            self._ensure_database_ready()
         if self._use_database:
             session = get_session()
             try:
@@ -59,6 +63,15 @@ class ShortTermMemoryStore:
             return
 
         self._local_store.pop((user_id, session_id), None)
+
+    def _ensure_database_ready(self) -> None:
+        if not self._use_database or self._db_ready:
+            return
+        try:
+            create_tables()
+            self._db_ready = True
+        except Exception:
+            self._use_database = False
 
     def _append_local(self, turn: ConversationTurn) -> None:
         key = (turn.user_id, turn.session_id)

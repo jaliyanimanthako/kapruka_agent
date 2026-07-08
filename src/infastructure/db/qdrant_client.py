@@ -46,6 +46,14 @@ def ensure_collection(
     client = get_qdrant_client()
     existing = {collection.name for collection in client.get_collections().collections}
     if collection_name in existing:
+        info = client.get_collection(collection_name)
+        existing_size = info.config.params.vectors.size  # type: ignore[union-attr]
+        if existing_size != vector_size:
+            raise ValueError(
+                f"Qdrant collection '{collection_name}' has vector size {existing_size}, "
+                f"but the current embedder requires {vector_size}. "
+                f"Delete and recreate the collection or align EMBEDDING_DIM/EMBEDDING_MODEL."
+            )
         return
 
     client.create_collection(
