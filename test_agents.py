@@ -136,6 +136,11 @@ class AgentTests(unittest.TestCase):
         decision = KaprukaRouter(use_llm=False).route("Can you deliver this to Colombo today?")
         self.assertEqual(decision.route, "logistics_check")
 
+    def test_router_does_not_treat_intro_plus_product_request_as_smalltalk(self) -> None:
+        decision = KaprukaRouter(use_llm=False).route("I am gayantha, what are your options in cakes")
+
+        self.assertEqual(decision.route, "catalog_search")
+
     def test_logistics_agent_detects_known_district(self) -> None:
         result = LogisticsAgent().check_delivery("Need same-day delivery to Kandy")
         self.assertEqual(result.district, "Kandy")
@@ -209,6 +214,43 @@ class AgentTests(unittest.TestCase):
             memory_context="user: what are your delivery options\nassistant: I need the target Sri Lankan district before I can assess delivery feasibility.",
         )
         self.assertEqual(decision.route, "logistics_check")
+
+    def test_router_routes_known_location_without_memory_context(self) -> None:
+        decision = KaprukaRouter(use_llm=False).route("i am near kelaniya")
+
+        self.assertEqual(decision.route, "logistics_check")
+
+    def test_logistics_agent_handles_known_location_without_memory_context(self) -> None:
+        result = LogisticsAgent().check_delivery("i am near kelaniya")
+
+        self.assertEqual(result.district, "Gampaha")
+        self.assertTrue(result.supported)
+
+    def test_orchestrator_routes_location_after_user_id_change(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            stack = CognitiveMemoryStack(
+                short_term=ShortTermMemoryStore(use_database=False),
+                long_term=FakeLongTermStore(),
+                semantic=SemanticProfileStore(Path(tmp_dir) / "profiles.json"),
+            )
+            orchestrator = KaprukaOrchestrator(
+                memory_stack=stack,
+                catalog_agent=CatalogAgent(memory_stack=stack, chat_service=FakeChatService()),
+            )
+
+            orchestrator.handle_message(
+                "what are your delivery options",
+                user_id="old-user",
+                session_id="demo-session",
+            )
+            response = orchestrator.handle_message(
+                "i am near kelaniya",
+                user_id="new-user",
+                session_id="demo-session",
+            )
+
+            self.assertEqual(response.route, "logistics_check")
+            self.assertEqual(response.specialist_output["logistics"]["district"], "Gampaha")
 
     def test_orchestrator_updates_semantic_profile(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -293,6 +335,30 @@ class AgentTests(unittest.TestCase):
             profile = stack.get_user_profile("demo-user")
             assert profile is not None
             self.assertEqual(profile.name, "Jaiya")
+
+    def test_orchestrator_saves_name_but_routes_intro_product_request_to_catalog(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            stack = CognitiveMemoryStack(
+                short_term=ShortTermMemoryStore(use_database=False),
+                long_term=FakeLongTermStore(),
+                user_store=UserProfileStore(Path(tmp_dir) / "user_profiles.json"),
+            )
+            orchestrator = KaprukaOrchestrator(
+                memory_stack=stack,
+                catalog_agent=CatalogAgent(memory_stack=stack, chat_service=FakeChatService()),
+                meta_agent=MetaAgent(use_llm=False),
+            )
+
+            response = orchestrator.handle_message(
+                "I am gayantha, what are your options in cakes",
+                user_id="110-011",
+                session_id="demo-session",
+            )
+
+            self.assertEqual(response.route, "catalog_search")
+            profile = stack.get_user_profile("110-011")
+            assert profile is not None
+            self.assertEqual(profile.name, "Gayantha")
 
     def test_orchestrator_recalls_user_name(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

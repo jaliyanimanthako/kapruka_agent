@@ -223,6 +223,8 @@ class LogisticsAgent:
         lowered = message.lower()
         if any(keyword in lowered for keyword in LOGISTICS_KEYWORDS):
             return True
+        if self._extract_district(message) and self._looks_like_location_statement(lowered):
+            return True
 
         if memory_context and any(word in memory_context.lower() for word in ("deliver", "delivery", "district", "arrival")):
             if self._extract_district(message):
@@ -231,6 +233,11 @@ class LogisticsAgent:
                 return True
 
         return False
+
+    def _looks_like_location_statement(self, lowered: str) -> bool:
+        if re.search(r"\b(i am|i'm|im|near|around|from|at|in|to)\b", lowered):
+            return True
+        return len(lowered.split()) <= 4
 
     def _urgency_level(self, message: str) -> str:
         lowered = message.lower()

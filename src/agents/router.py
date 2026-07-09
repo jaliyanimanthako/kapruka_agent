@@ -7,6 +7,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
+from agents.logistics_agent import SRI_LANKAN_DISTRICTS
 from agents.prompts.agent_prompts import build_router_policy_prompt, build_router_user_prompt
 from infastructure.config import OPENAI_API_KEY, OPENAI_CHAT_MAX_TOKENS, OPENAI_CHAT_MODEL
 
@@ -28,6 +29,22 @@ PREFERENCE_PATTERNS = (
     r"\b(?:only\s+can|can\s+only)\s+(?:eat|have|take)\b",
     r"\bmy budget is\b",
     r"\bremember .*budget\b",
+)
+
+PRODUCT_SEARCH_PATTERNS = (
+    r"\bwhat are (my|the|your)?\s*options\b",
+    r"\bshow me\b",
+    r"\bfind me\b",
+    r"\blooking for\b",
+    r"\bi need\b",
+    r"\bi want\b",
+    r"\boptions in\b",
+    r"\boptions for\b",
+    r"\bgift for\b",
+    r"\brecommend\b",
+    r"\bsuggest\b",
+    r"\bbuy\b",
+    r"\bprice\b",
 )
 
 LOGISTICS_PATTERNS = (
@@ -334,6 +351,14 @@ class KaprukaRouter:
                 params={"message": user_message},
             )
 
+        if self._is_product_search(lowered):
+            return RouteDecision(
+                route="catalog_search",
+                confidence=0.90,
+                reasoning="The user is asking for product options or recommendations.",
+                params={"query": user_message},
+            )
+
         if self._is_smalltalk(lowered):
             return RouteDecision(
                 route="smalltalk",
@@ -400,6 +425,14 @@ class KaprukaRouter:
                 params={"message": user_message},
             )
 
+        if self._is_product_search(lowered):
+            return RouteDecision(
+                route="catalog_search",
+                confidence=0.90,
+                reasoning="The user is asking for product options or recommendations.",
+                params={"query": user_message},
+            )
+
         if self._is_smalltalk(lowered):
             return RouteDecision(
                 route="smalltalk",
@@ -426,8 +459,13 @@ class KaprukaRouter:
             return False
         return self._matches_any(text, PREFERENCE_PATTERNS)
 
+    def _is_product_search(self, text: str) -> bool:
+        return self._matches_any(text, PRODUCT_SEARCH_PATTERNS)
+
     def _is_logistics_question(self, text: str, memory_context: str = "") -> bool:
         if self._matches_any(text, LOGISTICS_PATTERNS):
+            return True
+        if self._mentions_known_delivery_area(text) and self._looks_like_location_statement(text):
             return True
         if "can you" in text and any(word in text for word in ("deliver", "send", "ship")):
             return True
@@ -472,6 +510,18 @@ class KaprukaRouter:
 
     def _is_self_introduction(self, text: str) -> bool:
         return self._matches_any(text, SELF_INTRO_PATTERNS)
+
+    def _mentions_known_delivery_area(self, text: str) -> bool:
+        lowered = text.lower()
+        for aliases in SRI_LANKAN_DISTRICTS.values():
+            if any(re.search(rf"\b{re.escape(alias)}\b", lowered) for alias in aliases):
+                return True
+        return False
+
+    def _looks_like_location_statement(self, text: str) -> bool:
+        if re.search(r"\b(i am|i'm|im|near|around|from|at|in|to)\b", text, flags=re.IGNORECASE):
+            return True
+        return len(text.split()) <= 4
 
     def _matches_any(self, text: str, patterns: tuple[str, ...]) -> bool:
         return any(re.search(pattern, text, flags=re.IGNORECASE) for pattern in patterns)

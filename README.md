@@ -74,6 +74,43 @@ Qdrant collection dimension matches the embedding model. For
 ./.venv/bin/python -m unittest test_web_crawler.py test_memory.py
 ```
 
+## FastAPI
+
+Install dependencies:
+
+```bash
+./.venv/bin/pip install -r requirements.txt
+```
+
+Run the API from the project root:
+
+```bash
+./.venv/bin/uvicorn api.main:app --reload --host 127.0.0.1 --port 8000
+```
+
+Health check:
+
+```bash
+curl http://127.0.0.1:8000/health
+```
+
+Chat request:
+
+```bash
+curl -X POST http://127.0.0.1:8000/chat \
+  -H "Content-Type: application/json" \
+  -d '{
+    "message": "gift for wife",
+    "user_id": "demo-user",
+    "session_id": "demo-session",
+    "top_k": 5
+  }'
+```
+
+For a frontend, send user messages to `POST /chat`. The response includes the
+assistant answer, selected route, progress messages, specialist output, and
+timings for debug panels.
+
 ## End-to-End Demo
 
 Run the three memory tiers together:

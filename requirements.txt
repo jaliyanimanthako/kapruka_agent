@@ -6,3 +6,5 @@ qdrant-client
 sqlalchemy
 openai
 psycopg2-binary
+fastapi
+uvicorn
