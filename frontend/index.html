@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Kapruka Gift Assistant</title>
+    <link rel="stylesheet" href="./styles.css">
+  </head>
+  <body>
+    <main class="shell">
+      <section class="hero" aria-labelledby="app-title">
+        <div>
+          <p class="eyebrow">Kapruka Memory Assistant</p>
+          <h1 id="app-title">Find the right gift with catalog, memory, and delivery context.</h1>
+        </div>
+        <div class="status-card" id="health-card">
+          <span class="status-dot" id="health-dot"></span>
+          <div>
+            <strong id="health-label">Checking API</strong>
+            <small id="health-detail">http://127.0.0.1:8000</small>
+          </div>
+        </div>
+      </section>
+
+      <section class="workspace">
+        <aside class="panel settings-panel" aria-label="Assistant settings">
+          <div class="panel-header">
+            <h2>Session</h2>
+            <button class="ghost-button" id="reset-session" type="button">Reset</button>
+          </div>
+
+          <label>
+            API URL
+            <input id="api-url" type="url" value="http://127.0.0.1:8000" autocomplete="off">
+          </label>
+
+          <label>
+            User ID
+            <input id="user-id" type="text" value="demo-user" autocomplete="off">
+          </label>
+
+          <label>
+            Session ID
+            <input id="session-id" type="text" value="demo-session" autocomplete="off">
+          </label>
+
+          <div class="grid-two">
+            <label>
+              Top K
+              <input id="top-k" type="number" min="1" max="20" value="5">
+            </label>
+            <label>
+              Threshold
+              <input id="score-threshold" type="number" min="0" max="1" step="0.05" value="0">
+            </label>
+          </div>
+
+          <label>
+            Recipient ID
+            <input id="recipient-id" type="text" placeholder="wife, friend, mother" autocomplete="off">
+          </label>
+
+          <label>
+            Recipient Name
+            <input id="recipient-name" type="text" placeholder="Optional" autocomplete="off">
+          </label>
+
+          <label class="check-row">
+            <input id="use-database-short-term" type="checkbox">
+            Use Supabase short-term memory
+          </label>
+
+          <div class="hint">
+            Keep the same user ID and session ID to test memory continuity.
+          </div>
+        </aside>
+
+        <section class="chat-panel" aria-label="Chat">
+          <div class="messages" id="messages" aria-live="polite">
+            <article class="message assistant">
+              <div class="avatar">K</div>
+              <div class="bubble">
+                <p>Ask for a product, save a recipient preference, or check delivery feasibility.</p>
+                <div class="examples">
+                  <button type="button" data-example="I am Gayantha, what are your options in cakes">Cake options</button>
+                  <button type="button" data-example="My wife Neth can only eat white chocolates">Save preference</button>
+                  <button type="button" data-example="Can you deliver a cake to Colombo today?">Delivery check</button>
+                </div>
+              </div>
+            </article>
+          </div>
+
+          <form class="composer" id="chat-form">
+            <textarea id="message-input" rows="2" placeholder="Type your message..." required></textarea>
+            <button id="send-button" type="submit">Send</button>
+          </form>
+        </section>
+
+        <aside class="panel debug-panel" aria-label="Debug output">
+          <div class="panel-header">
+            <h2>Agent Trace</h2>
+            <span class="pill" id="route-pill">idle</span>
+          </div>
+
+          <section>
+            <h3>Progress</h3>
+            <ul id="progress-list" class="progress-list">
+              <li>No request yet.</li>
+            </ul>
+          </section>
+
+          <section>
+            <h3>Timing</h3>
+            <pre id="timings-output">{}</pre>
+          </section>
+
+          <section>
+            <h3>Specialist Output</h3>
+            <pre id="specialist-output">{}</pre>
+          </section>
+        </aside>
+      </section>
+    </main>
+
+    <script src="./app.js" type="module"></script>
+  </body>
+</html>

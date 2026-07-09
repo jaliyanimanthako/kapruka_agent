@@ -1,3 +1,6 @@
 __pycache__/
 *.pyc
 .venv/
+.env
+recipient_profiles.json
+user_profiles.json
