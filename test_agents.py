@@ -106,6 +106,39 @@ class FakeUnsafeChocolateLongTermStore:
         }
 
 
+class FakeMixedTvLongTermStore:
+    def ingest_catalog(self, catalog_path: str | Path = "catalog.json") -> int:
+        return 0
+
+    def search(self, query: str, top_k: int = 5, score_threshold: float = 0.0):
+        return self.search_detailed(query, top_k=top_k, score_threshold=score_threshold)[0]
+
+    def search_detailed(self, query: str, top_k: int = 5, score_threshold: float = 0.0, progress_callback=None):
+        teddy = CatalogProduct(
+            name="Adarei Teddy In Love",
+            price="US$19.44",
+            description="Soft teddy bear gift",
+            availability="In Stock",
+            url="https://example.com/teddy",
+        )
+        tv = CatalogProduct(
+            name="Konka 32 Inch Full Hd Led Tv Kg32ee682",
+            price="US$120.00",
+            description="Full HD LED TV for home entertainment",
+            availability="In Stock",
+            url="https://example.com/tv",
+        )
+        return [
+            CatalogMatch(product=teddy, score=0.99, product_id="teddy1"),
+            CatalogMatch(product=tv, score=0.42, product_id="tv1"),
+        ], {
+            "lexical_search": 1,
+            "query_embedding": 1,
+            "qdrant_search": 1,
+            "result_rerank": 1,
+        }
+
+
 class FakeChatService:
     def answer_query(self, query: str, bundle: dict) -> str:
         return f"stubbed answer for: {query} ({len(bundle.get('catalog_matches', []))} match)"
@@ -586,6 +619,33 @@ class AgentTests(unittest.TestCase):
             self.assertEqual(response.specialist_output["catalog"]["bundle"]["recent_turns"], [])
             self.assertTrue(response.specialist_output["catalog"]["memory_gate"]["topic_shifted"])
             self.assertFalse(response.specialist_output["catalog"]["memory_gate"]["use_short_term"])
+
+    def test_direct_product_query_filters_unrelated_catalog_matches(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            stack = CognitiveMemoryStack(
+                short_term=ShortTermMemoryStore(use_database=False),
+                long_term=FakeMixedTvLongTermStore(),
+                semantic=SemanticProfileStore(Path(tmp_dir) / "profiles.json"),
+            )
+            orchestrator = KaprukaOrchestrator(
+                memory_stack=stack,
+                catalog_agent=CatalogAgent(memory_stack=stack, chat_service=FakeChatService()),
+            )
+
+            response = orchestrator.handle_message("what are your options in led tvs")
+
+            catalog_output = response.specialist_output["catalog"]
+            product_names = [
+                match["product"]["name"]
+                for match in catalog_output["bundle"]["catalog_matches"]
+            ]
+            self.assertEqual(product_names, ["Konka 32 Inch Full Hd Led Tv Kg32ee682"])
+            self.assertEqual(catalog_output["bundle"]["product_relevance_filter"]["category"], "tv")
+            self.assertEqual(catalog_output["bundle"]["product_relevance_filter"]["removed_count"], 1)
+            self.assertIn("Konka 32 Inch Full Hd Led Tv Kg32ee682", response.answer)
+            self.assertNotIn("avoid tv", response.answer.lower())
+            self.assertNotIn("non-tv", response.answer.lower())
+            self.assertNotIn("Adarei Teddy", response.answer)
 
 
 if __name__ == "__main__":

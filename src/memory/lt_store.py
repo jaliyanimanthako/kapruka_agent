@@ -18,6 +18,34 @@ from memory.schemas import CatalogMatch, CatalogProduct
 class CatalogVectorStore:
     """Persistent Qdrant vector store for the crawled `catalog.json`."""
 
+    QUERY_STOPWORDS = {
+        "a",
+        "an",
+        "and",
+        "are",
+        "can",
+        "for",
+        "give",
+        "have",
+        "i",
+        "in",
+        "is",
+        "me",
+        "my",
+        "of",
+        "on",
+        "options",
+        "or",
+        "please",
+        "show",
+        "some",
+        "the",
+        "to",
+        "what",
+        "with",
+        "your",
+    }
+
     def __init__(
         self,
         collection_name: str = QDRANT_COLLECTION_NAME,
@@ -237,4 +265,13 @@ class CatalogVectorStore:
         return ranked[:top_k]
 
     def _query_tokens(self, query: str) -> List[str]:
-        return [token for token in re.findall(r"[a-z0-9]+", query.lower()) if len(token) > 1]
+        tokens: List[str] = []
+        seen = set()
+        for token in re.findall(r"[a-z0-9]+", query.lower()):
+            normalized = token[:-1] if token.endswith("s") and len(token) > 3 else token
+            for candidate in (token, normalized):
+                if len(candidate) <= 1 or candidate in self.QUERY_STOPWORDS or candidate in seen:
+                    continue
+                seen.add(candidate)
+                tokens.append(candidate)
+        return tokens

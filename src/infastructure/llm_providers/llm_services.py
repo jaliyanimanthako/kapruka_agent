@@ -25,6 +25,8 @@ Use the provided memory sections carefully:
 
 Rules:
 - USER_QUERY has the highest priority. If it asks for a specific product type or category, follow that first.
+- Never infer that the user wants to avoid a product category just because USER_QUERY names that category.
+- Only mention avoidance, allergies, or exclusions when SEMANTIC_PROFILE explicitly contains that constraint.
 - Base recommendations only on the provided catalog matches.
 - If profile preferences exist, use them only when they do not conflict with the current USER_QUERY.
 - Treat profile constraints, allergies, and avoids as hard exclusions when explaining recommendations.

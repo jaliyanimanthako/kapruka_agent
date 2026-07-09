@@ -46,12 +46,12 @@ def _cors_origins() -> List[str]:
     configured = os.getenv("API_CORS_ORIGINS", "").strip()
     if configured:
         return [origin.strip() for origin in configured.split(",") if origin.strip()]
-    return [
-        "http://localhost:3000",
-        "http://127.0.0.1:3000",
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-    ]
+    return ["*"]
+
+
+def _cors_origin_regex() -> Optional[str]:
+    configured = os.getenv("API_CORS_ORIGIN_REGEX", "").strip()
+    return configured or None
 
 
 app = FastAPI(
@@ -62,7 +62,8 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_cors_origins(),
-    allow_credentials=True,
+    allow_origin_regex=_cors_origin_regex(),
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )

@@ -111,6 +111,32 @@ For a frontend, send user messages to `POST /chat`. The response includes the
 assistant answer, selected route, progress messages, specialist output, and
 timings for debug panels.
 
+## Frontend
+
+The frontend is a separate static app under `frontend/`. Start the backend first:
+
+```bash
+./.venv/bin/uvicorn api.main:app --reload --host 127.0.0.1 --port 8000
+```
+
+In another terminal, serve the frontend on a CORS-allowed local port:
+
+```bash
+python3 -m http.server 5173 -d frontend
+```
+
+Open:
+
+```text
+http://127.0.0.1:5173
+```
+
+The frontend calls `POST http://127.0.0.1:8000/chat`. Keep the same `user_id`
+and `session_id` in the left panel when testing memory continuity.
+
+The backend allows all CORS origins by default for local development. To lock it
+down, set `API_CORS_ORIGINS` or `API_CORS_ORIGIN_REGEX` in `.env`.
+
 ## End-to-End Demo
 
 Run the three memory tiers together:
