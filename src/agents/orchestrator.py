@@ -393,6 +393,7 @@ class KaprukaOrchestrator:
                     "query": result.query,
                     "bundle": result.bundle,
                     "memory_gate": result.memory_gate,
+                    "reflection": result.reflection,
                     "timings_ms": result.timings_ms,
                 }
             },

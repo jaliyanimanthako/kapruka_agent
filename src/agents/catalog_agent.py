@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import re
 import time
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from infastructure.llm_providers.llm_services import OpenAIChatService
 from memory.memory_ops import CognitiveMemoryStack
@@ -17,6 +18,7 @@ class CatalogAgentResult:
     query: str
     bundle: Dict[str, object]
     memory_gate: Dict[str, object]
+    reflection: Dict[str, object]
     answer: str
     timings_ms: Dict[str, int]
 
@@ -110,6 +112,11 @@ class CatalogAgent:
                 else None
             ),
         }
+        if progress_callback:
+            progress_callback("Reflecting on gift safety and preference alignment...")
+        reflection_started_at = time.perf_counter()
+        reflection = self._reflect_and_revise(bundle)
+        reflection_ms = int((time.perf_counter() - reflection_started_at) * 1000)
         retrieval_ms = int((time.perf_counter() - retrieval_started_at) * 1000)
 
         answer_started_at = time.perf_counter()
@@ -120,6 +127,7 @@ class CatalogAgent:
             query=query,
             bundle=bundle,
             memory_gate=memory_gate.to_dict(),
+            reflection=reflection,
             answer=answer,
             timings_ms={
                 "short_term_read": short_term_ms,
@@ -128,6 +136,7 @@ class CatalogAgent:
                 "retrieval_query_build": query_build_ms,
                 "vector_search_total": vector_total_ms,
                 **vector_timings,
+                "reflection_loop": reflection_ms,
                 "catalog_retrieval": retrieval_ms,
                 "catalog_answer_generation": answer_ms,
             },
@@ -159,3 +168,67 @@ class CatalogAgent:
                 f"{product['availability']} - {product['url']}"
             )
         return "\n".join(lines)
+
+    def _reflect_and_revise(self, bundle: Dict[str, object]) -> Dict[str, object]:
+        """Remove catalog matches that violate recipient constraints before answer generation."""
+        profile = bundle.get("recipient_profile") or {}
+        constraints = profile.get("constraints", []) if isinstance(profile, dict) else []
+        catalog_matches = list(bundle.get("catalog_matches", []))
+
+        violations = []
+        revised_matches = []
+        for match in catalog_matches:
+            product = match.get("product", {})
+            violated_constraints = self._violated_constraints(product=product, constraints=constraints)
+            if violated_constraints:
+                violations.append(
+                    {
+                        "product_id": match.get("product_id", ""),
+                        "product_name": product.get("name", ""),
+                        "violated_constraints": violated_constraints,
+                    }
+                )
+                continue
+            revised_matches.append(match)
+
+        if violations:
+            bundle["catalog_matches"] = revised_matches
+
+        return {
+            "draft_count": len(catalog_matches),
+            "revised_count": len(revised_matches),
+            "violations": violations,
+            "revised": bool(violations),
+        }
+
+    def _violated_constraints(self, product: Dict[str, object], constraints: List[str]) -> List[str]:
+        product_text = " ".join(
+            str(product.get(key, ""))
+            for key in ("name", "description")
+        )
+        product_terms = self._constraint_terms(product_text)
+        if not product_terms:
+            return []
+
+        violated = []
+        for constraint in constraints:
+            constraint_terms = self._constraint_terms(str(constraint))
+            if product_terms & constraint_terms:
+                violated.append(str(constraint))
+        return violated
+
+    def _constraint_terms(self, text: str) -> set[str]:
+        normalized = (
+            text.lower()
+            .replace("chocaltes", "chocolates")
+            .replace("chocalates", "chocolates")
+            .replace("chocalte", "chocolate")
+            .replace("chocalate", "chocolate")
+        )
+        terms = set()
+        for match in re.finditer(r"\b(?:dark|white|milk)?\s*chocolates?\b", normalized):
+            term = " ".join(match.group(0).split()).replace("chocolates", "chocolate")
+            terms.add(term)
+        for match in re.finditer(r"\b(?:peanuts?|nuts?|gluten|dairy|egg|eggs|seafood|fish)\b", normalized):
+            terms.add(match.group(0))
+        return terms

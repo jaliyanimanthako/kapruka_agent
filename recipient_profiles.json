@@ -4,11 +4,14 @@
     "name": "Wife",
     "relationship": "spouse",
     "preferences": [
-      "Loves dark chocolate",
       "Loves elegant packaging",
       "Likes white chocaltaes"
     ],
+    "constraints": [
+      "Avoids She",
+      "Avoids Dark chocolate"
+    ],
     "notes": [],
-    "updated_at": 1783501965.744801
+    "updated_at": 1783567977.378547
   }
 }

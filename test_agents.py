@@ -73,6 +73,39 @@ class FakeLongTermStore:
         }
 
 
+class FakeUnsafeChocolateLongTermStore:
+    def ingest_catalog(self, catalog_path: str | Path = "catalog.json") -> int:
+        return 0
+
+    def search(self, query: str, top_k: int = 5, score_threshold: float = 0.0):
+        return self.search_detailed(query, top_k=top_k, score_threshold=score_threshold)[0]
+
+    def search_detailed(self, query: str, top_k: int = 5, score_threshold: float = 0.0, progress_callback=None):
+        unsafe = CatalogProduct(
+            name="Dark Chocolate Birthday Hamper",
+            price="US$20.00",
+            description="A premium dark chocolate hamper",
+            availability="In Stock",
+            url="https://example.com/dark",
+        )
+        safe = CatalogProduct(
+            name="White Chocolate Birthday Hamper",
+            price="US$22.00",
+            description="A white chocolate gift hamper",
+            availability="In Stock",
+            url="https://example.com/white",
+        )
+        return [
+            CatalogMatch(product=unsafe, score=0.9, product_id="dark1"),
+            CatalogMatch(product=safe, score=0.8, product_id="white1"),
+        ], {
+            "lexical_search": 1,
+            "query_embedding": 1,
+            "qdrant_search": 1,
+            "result_rerank": 1,
+        }
+
+
 class FakeChatService:
     def answer_query(self, query: str, bundle: dict) -> str:
         return f"stubbed answer for: {query} ({len(bundle.get('catalog_matches', []))} match)"
@@ -376,6 +409,38 @@ class AgentTests(unittest.TestCase):
         self.assertEqual(recipient["recipient_id"], "wife")
         self.assertEqual(recipient["recipient_name"], "Neth")
         self.assertEqual(recipient["relationship"], "spouse")
+
+    def test_catalog_reflection_removes_allergy_violations_before_answering(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            stack = CognitiveMemoryStack(
+                short_term=ShortTermMemoryStore(use_database=False),
+                long_term=FakeUnsafeChocolateLongTermStore(),
+                semantic=SemanticProfileStore(Path(tmp_dir) / "profiles.json"),
+            )
+            stack.save_recipient_profile(
+                recipient_id="wife",
+                name="Wife",
+                relationship="spouse",
+                preferences=["Can eat White chocolates"],
+                constraints=["Avoids Dark chocolate"],
+            )
+            orchestrator = KaprukaOrchestrator(
+                memory_stack=stack,
+                catalog_agent=CatalogAgent(memory_stack=stack, chat_service=FakeChatService()),
+            )
+
+            response = orchestrator.handle_message("birthday chocolate gift for wife", recipient_id="wife")
+
+            catalog_output = response.specialist_output["catalog"]
+            product_names = [
+                match["product"]["name"]
+                for match in catalog_output["bundle"]["catalog_matches"]
+            ]
+            self.assertNotIn("Dark Chocolate Birthday Hamper", product_names)
+            self.assertIn("White Chocolate Birthday Hamper", product_names)
+            self.assertTrue(catalog_output["reflection"]["revised"])
+            self.assertEqual(catalog_output["reflection"]["violations"][0]["product_id"], "dark1")
+            self.assertIn("reflection_loop", response.timings_ms)
 
     def test_orchestrator_runs_catalog_specialist(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
