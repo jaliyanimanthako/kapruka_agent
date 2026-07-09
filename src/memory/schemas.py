@@ -63,6 +63,7 @@ class RecipientProfile:
     name: str
     relationship: str = ""
     preferences: List[str] = field(default_factory=list)
+    constraints: List[str] = field(default_factory=list)
     notes: List[str] = field(default_factory=list)
     updated_at: float = 0.0
 
@@ -72,6 +73,7 @@ class RecipientProfile:
             "name": self.name,
             "relationship": self.relationship,
             "preferences": self.preferences,
+            "constraints": self.constraints,
             "notes": self.notes,
             "updated_at": self.updated_at,
         }
@@ -83,6 +85,31 @@ class RecipientProfile:
             name=data["name"],
             relationship=data.get("relationship", ""),
             preferences=list(data.get("preferences", [])),
+            constraints=list(data.get("constraints", [])),
             notes=list(data.get("notes", [])),
+            updated_at=float(data.get("updated_at", 0.0)),
+        )
+
+
+@dataclass
+class UserProfile:
+    """JSON-backed semantic profile for the end user."""
+
+    user_id: str
+    name: str = ""
+    updated_at: float = 0.0
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "user_id": self.user_id,
+            "name": self.name,
+            "updated_at": self.updated_at,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "UserProfile":
+        return cls(
+            user_id=data["user_id"],
+            name=data.get("name", ""),
             updated_at=float(data.get("updated_at", 0.0)),
         )

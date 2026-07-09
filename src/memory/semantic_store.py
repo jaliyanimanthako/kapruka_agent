@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -31,7 +32,12 @@ class SemanticProfileStore:
             merged.relationship = profile.relationship
 
         merged.preferences = self._merge_unique(merged.preferences, profile.preferences)
+        merged.constraints = self._merge_unique(merged.constraints, profile.constraints)
         merged.notes = self._merge_unique(merged.notes, profile.notes)
+        merged.preferences = self._remove_conflicting_preferences(
+            preferences=merged.preferences,
+            constraints=merged.constraints,
+        )
         merged.updated_at = time.time()
 
         data[profile.recipient_id] = merged.to_dict()
@@ -82,3 +88,30 @@ class SemanticProfileStore:
                 merged.append(item)
                 existing_lower.add(item.lower())
         return merged
+
+    def _remove_conflicting_preferences(self, preferences: List[str], constraints: List[str]) -> List[str]:
+        if not constraints:
+            return preferences
+
+        constraint_terms = set()
+        for constraint in constraints:
+            constraint_terms.update(self._food_terms(constraint))
+
+        if not constraint_terms:
+            return preferences
+
+        return [
+            preference
+            for preference in preferences
+            if not (self._food_terms(preference) & constraint_terms)
+        ]
+
+    def _food_terms(self, text: str) -> set[str]:
+        normalized = text.lower().replace("chocalte", "chocolate").replace("chocalates", "chocolates")
+        terms = set()
+        for match in re.finditer(r"\b(?:dark|white|milk)?\s*chocolates?\b", normalized):
+            term = " ".join(match.group(0).split()).replace("chocolates", "chocolate")
+            terms.add(term)
+        for match in re.finditer(r"\b(?:peanuts?|nuts?|gluten|dairy|egg|eggs|seafood|fish)\b", normalized):
+            terms.add(match.group(0))
+        return terms

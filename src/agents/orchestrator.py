@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import re
 import time
 from dataclasses import asdict, dataclass
 from typing import Any, Callable, Dict, Optional
 
 from agents.catalog_agent import CatalogAgent, CatalogAgentResult
 from agents.logistics_agent import LogisticsAgent, LogisticsCheckResult
+from agents.meta_agent import MetaAgent, MetaAgentResult
 from agents.router import KaprukaRouter, RouteDecision
 from memory.memory_ops import CognitiveMemoryStack
 from memory.st_store import ShortTermMemoryStore
@@ -28,17 +30,21 @@ class OrchestratorResponse:
 class KaprukaOrchestrator:
     """Router + specialist agents on top of the 3-tier memory stack."""
 
+    ROUTER_CONFIDENCE_FLOOR = 0.55
+
     def __init__(
         self,
         memory_stack: Optional[CognitiveMemoryStack] = None,
         router: Optional[KaprukaRouter] = None,
         catalog_agent: Optional[CatalogAgent] = None,
         logistics_agent: Optional[LogisticsAgent] = None,
+        meta_agent: Optional[MetaAgent] = None,
     ) -> None:
         self.memory_stack = memory_stack or CognitiveMemoryStack()
         self.router = router or KaprukaRouter()
         self.catalog_agent = catalog_agent or CatalogAgent(self.memory_stack)
         self.logistics_agent = logistics_agent or LogisticsAgent()
+        self.meta_agent = meta_agent or MetaAgent()
         self._active_recipient_by_session: Dict[tuple[str, str], Dict[str, str]] = {}
 
     def handle_message(
@@ -55,7 +61,49 @@ class KaprukaOrchestrator:
     ) -> OrchestratorResponse:
         total_started_at = time.perf_counter()
         self._progress(progress_callback, "Routing message...")
-        routing_memory_context = self._build_router_memory_context(user_id=user_id, session_id=session_id)
+        introduced_name = self.router.extract_user_name(user_message)
+        if introduced_name:
+            self.memory_stack.save_user_profile(user_id=user_id, name=introduced_name)
+
+        route_started_at = time.perf_counter()
+        initial_decision = self.router.route(user_message, memory_context="")
+        if initial_decision.route in {"smalltalk", "identity"}:
+            decision = initial_decision
+            routing_memory_context = ""
+        else:
+            routing_memory_context = self._build_router_memory_context(user_id=user_id, session_id=session_id)
+            decision = self.router.route(user_message, memory_context=routing_memory_context)
+        route_ms = int((time.perf_counter() - route_started_at) * 1000)
+        self._progress(
+            progress_callback,
+            f"Route selected: {decision.route} ({decision.reasoning})",
+        )
+
+        if decision.route in {"smalltalk", "identity"}:
+            return self._handle_meta_message(
+                user_message=user_message,
+                user_id=user_id,
+                decision=decision,
+                route_ms=route_ms,
+                total_started_at=total_started_at,
+            )
+
+        if decision.route == "unclear" or decision.confidence < self.ROUTER_CONFIDENCE_FLOOR:
+            return self._handle_unclear_message(
+                user_message=user_message,
+                decision=decision,
+                route_ms=route_ms,
+                total_started_at=total_started_at,
+            )
+
+        if decision.route == "order_status":
+            return self._handle_order_status(
+                user_message=user_message,
+                decision=decision,
+                route_ms=route_ms,
+                total_started_at=total_started_at,
+            )
+
         resolved_recipient = self._resolve_recipient(
             user_message=user_message,
             user_id=user_id,
@@ -67,14 +115,14 @@ class KaprukaOrchestrator:
         effective_recipient_id = resolved_recipient["recipient_id"] or None
         effective_recipient_name = resolved_recipient["recipient_name"]
         effective_relationship = resolved_recipient["relationship"]
-
-        route_started_at = time.perf_counter()
-        decision = self.router.route(user_message, memory_context=routing_memory_context)
-        route_ms = int((time.perf_counter() - route_started_at) * 1000)
-        self._progress(
-            progress_callback,
-            f"Route selected: {decision.route} ({decision.reasoning})",
-        )
+        if effective_recipient_id:
+            self._set_active_recipient(
+                user_id=user_id,
+                session_id=session_id,
+                recipient_id=effective_recipient_id,
+                recipient_name=effective_recipient_name,
+                relationship=effective_relationship,
+            )
 
         if decision.route == "preference_update":
             return self._handle_preference_update(
@@ -156,6 +204,7 @@ class KaprukaOrchestrator:
             name=recipient_name,
             relationship=relationship,
             preferences=extracted["preferences"],
+            constraints=extracted["constraints"],
             notes=extracted["notes"],
         )
         self._set_active_recipient(
@@ -168,7 +217,9 @@ class KaprukaOrchestrator:
         specialist_ms = int((time.perf_counter() - specialist_started_at) * 1000)
         answer = (
             f"I updated {profile.name}'s profile with "
-            f"{len(extracted['preferences'])} preference(s) and {len(extracted['notes'])} note(s)."
+            f"{len(extracted['preferences'])} preference(s), "
+            f"{len(extracted['constraints'])} constraint(s), and "
+            f"{len(extracted['notes'])} note(s)."
         )
         self._progress(progress_callback, "Storing short-term turns...")
         store_started_at = time.perf_counter()
@@ -184,6 +235,88 @@ class KaprukaOrchestrator:
                 "router": route_ms,
                 "preference_update": specialist_ms,
                 "turn_storage": store_ms,
+                "total": int((time.perf_counter() - total_started_at) * 1000),
+            },
+        )
+
+    def _handle_meta_message(
+        self,
+        user_message: str,
+        user_id: str,
+        decision: RouteDecision,
+        route_ms: int,
+        total_started_at: float,
+    ) -> OrchestratorResponse:
+        user_profile = self.memory_stack.get_user_profile(user_id)
+        meta_started_at = time.perf_counter()
+        result: MetaAgentResult = self.meta_agent.answer(
+            user_message=user_message,
+            route=decision.route,
+            user_profile_name=user_profile.name if user_profile else "",
+            memory_context="",
+        )
+        meta_ms = int((time.perf_counter() - meta_started_at) * 1000)
+        return OrchestratorResponse(
+            route=decision.route,
+            reasoning=decision.reasoning,
+            answer=result.answer,
+            route_decision=asdict(decision),
+            specialist_output={
+                "meta": {
+                    "handled_directly": True,
+                    "source": result.source,
+                    "user_profile": user_profile.to_dict() if user_profile else None,
+                }
+            },
+            timings_ms={
+                "router": route_ms,
+                "meta_response": meta_ms,
+                "total": int((time.perf_counter() - total_started_at) * 1000),
+            },
+        )
+
+    def _handle_unclear_message(
+        self,
+        user_message: str,
+        decision: RouteDecision,
+        route_ms: int,
+        total_started_at: float,
+    ) -> OrchestratorResponse:
+        answer = (
+            "I can help with Kapruka product search, recipient preferences, or Sri Lankan delivery feasibility. "
+            "Tell me what you want to find, remember, or check."
+        )
+        return OrchestratorResponse(
+            route=decision.route,
+            reasoning=decision.reasoning,
+            answer=answer,
+            route_decision=asdict(decision),
+            specialist_output={"meta": {"handled_directly": True, "user_message": user_message}},
+            timings_ms={
+                "router": route_ms,
+                "total": int((time.perf_counter() - total_started_at) * 1000),
+            },
+        )
+
+    def _handle_order_status(
+        self,
+        user_message: str,
+        decision: RouteDecision,
+        route_ms: int,
+        total_started_at: float,
+    ) -> OrchestratorResponse:
+        answer = (
+            "I do not have live order-tracking connected yet. "
+            "If you share an order number, you would still need Kapruka's live order system or support for the exact status."
+        )
+        return OrchestratorResponse(
+            route=decision.route,
+            reasoning=decision.reasoning,
+            answer=answer,
+            route_decision=asdict(decision),
+            specialist_output={"meta": {"handled_directly": True, "user_message": user_message}},
+            timings_ms={
+                "router": route_ms,
                 "total": int((time.perf_counter() - total_started_at) * 1000),
             },
         )
@@ -259,6 +392,7 @@ class KaprukaOrchestrator:
                 "catalog": {
                     "query": result.query,
                     "bundle": result.bundle,
+                    "memory_gate": result.memory_gate,
                     "timings_ms": result.timings_ms,
                 }
             },
@@ -301,11 +435,15 @@ class KaprukaOrchestrator:
         if inferred["recipient_id"]:
             return inferred
 
-        return self._active_recipient_by_session.get((user_id, session_id), {
+        active = self._active_recipient_by_session.get((user_id, session_id))
+        if active and self._mentions_active_recipient_pronoun(user_message):
+            return active
+
+        return active or {
             "recipient_id": "",
             "recipient_name": "",
             "relationship": "",
-        })
+        }
 
     def _set_active_recipient(
         self,
@@ -329,6 +467,8 @@ class KaprukaOrchestrator:
         if progress_callback:
             progress_callback(message)
 
+    def _mentions_active_recipient_pronoun(self, user_message: str) -> bool:
+        return bool(re.search(r"\b(her|she|hers|him|he|his|them|they|their)\b", user_message, flags=re.IGNORECASE))
 
 def build_orchestrator(
     chat_service: Optional[Any] = None,

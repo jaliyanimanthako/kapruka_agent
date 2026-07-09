@@ -78,6 +78,10 @@ def main() -> int:
             print(json.dumps(response.route_decision, indent=2, ensure_ascii=False))
             print("Timings:")
             print(json.dumps(response.timings_ms, indent=2, ensure_ascii=False))
+            catalog_output = response.specialist_output.get("catalog", {})
+            if "memory_gate" in catalog_output:
+                print("Memory Gate:")
+                print(json.dumps(catalog_output["memory_gate"], indent=2, ensure_ascii=False))
             print("Specialist Output:")
             print(json.dumps(response.specialist_output, indent=2, ensure_ascii=False))
 

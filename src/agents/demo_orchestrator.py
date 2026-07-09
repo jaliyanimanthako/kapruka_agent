@@ -56,6 +56,10 @@ def main() -> int:
     print(json.dumps(response.route_decision, indent=2, ensure_ascii=False))
     print("\n=== TIMINGS (ms) ===")
     print(json.dumps(response.timings_ms, indent=2, ensure_ascii=False))
+    catalog_output = response.specialist_output.get("catalog", {})
+    if "memory_gate" in catalog_output:
+        print("\n=== MEMORY GATE ===")
+        print(json.dumps(catalog_output["memory_gate"], indent=2, ensure_ascii=False))
     print("\n=== SPECIALIST OUTPUT ===")
     print(json.dumps(response.specialist_output, indent=2, ensure_ascii=False))
     print("\n=== FINAL ANSWER ===")

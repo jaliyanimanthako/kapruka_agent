@@ -15,9 +15,10 @@ if str(SRC_DIR) not in sys.path:
 
 from memory.lt_store import CatalogVectorStore
 from memory.memory_ops import CognitiveMemoryStack
-from memory.schemas import CatalogProduct
+from memory.schemas import CatalogProduct, RecipientProfile, UserProfile
 from memory.semantic_store import SemanticProfileStore
 from memory.st_store import ShortTermMemoryStore
+from memory.user_store import UserProfileStore
 from infastructure.llm_providers.embeddings import SimpleHashEmbedder, get_default_catalog_embedder
 from infastructure.llm_providers.llm_services import build_memory_prompt
 
@@ -42,6 +43,31 @@ class MemoryStackTests(unittest.TestCase):
 
             self.assertEqual(profile.preferences, ["Loves dark chocolate"])
             self.assertEqual(profile.notes, ["Prefers elegant packaging"])
+
+    def test_semantic_profile_store_removes_preferences_conflicting_with_constraints(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            store = SemanticProfileStore(Path(tmp_dir) / "profiles.json")
+            store.remember_preference("wife", "Wife", preference="Loves dark chocolate")
+            profile = store.upsert_profile(
+                RecipientProfile(
+                    recipient_id="wife",
+                    name="Wife",
+                    constraints=["Avoids Dark chocolates"],
+                    preferences=["Can eat White chocolates"],
+                )
+            )
+
+            self.assertNotIn("Loves dark chocolate", profile.preferences)
+            self.assertIn("Can eat White chocolates", profile.preferences)
+            self.assertIn("Avoids Dark chocolates", profile.constraints)
+
+    def test_user_profile_store_updates_name(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            store = UserProfileStore(Path(tmp_dir) / "user_profiles.json")
+            profile = store.upsert_profile(UserProfile(user_id="u1", name="Jaiya"))
+
+            self.assertEqual(profile.name, "Jaiya")
+            self.assertEqual(store.get_profile("u1").name, "Jaiya")
 
     def test_catalog_vector_store_uses_kid_suffix_as_product_id(self) -> None:
         store = CatalogVectorStore()
@@ -79,6 +105,8 @@ class MemoryStackTests(unittest.TestCase):
 
             self.assertEqual(len(bundle["recent_turns"]), 1)
             self.assertEqual(bundle["recipient_profile"]["preferences"], ["Loves dark chocolate"])
+            self.assertTrue(bundle["memory_gate"]["use_short_term"])
+            self.assertTrue(bundle["memory_gate"]["use_recipient_profile"])
 
     def test_enhanced_query_includes_recent_turns_and_profile(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -160,6 +188,47 @@ class MemoryStackTests(unittest.TestCase):
             )
 
             self.assertEqual(query, "bluetooth speakers")
+
+    def test_memory_gate_turns_off_recent_turns_for_topic_shift(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            profile_store = SemanticProfileStore(Path(tmp_dir) / "profiles.json")
+            short_term = ShortTermMemoryStore(max_turns=5, ttl_seconds=3600, use_database=False)
+            stack = CognitiveMemoryStack(short_term=short_term, semantic=profile_store)
+
+            stack.add_turn("u1", "s1", "user", "Show me bluetooth speakers")
+            decision = stack.decide_memory_reads(
+                user_id="u1",
+                session_id="s1",
+                query="what are my options in led tvs",
+            )
+
+            self.assertTrue(decision.topic_shifted)
+            self.assertFalse(decision.use_short_term)
+
+    def test_memory_gate_keeps_profile_for_gift_led_query(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            profile_store = SemanticProfileStore(Path(tmp_dir) / "profiles.json")
+            short_term = ShortTermMemoryStore(max_turns=5, ttl_seconds=3600, use_database=False)
+            stack = CognitiveMemoryStack(short_term=short_term, semantic=profile_store)
+
+            profile = stack.save_recipient_profile(
+                recipient_id="wife",
+                name="Wife",
+                relationship="spouse",
+                preferences=["Loves dark chocolate"],
+                notes=["Prefers elegant packaging"],
+            )
+
+            decision = stack.decide_memory_reads(
+                user_id="u1",
+                session_id="s1",
+                query="gift for wife",
+                recipient_id="wife",
+                recipient_profile=profile,
+            )
+
+            self.assertTrue(decision.use_recipient_profile)
+            self.assertFalse(decision.topic_shifted)
 
     def test_lexical_matches_find_led_tvs(self) -> None:
         store = CatalogVectorStore()

@@ -23,6 +23,9 @@ PREFERENCE_PATTERNS = (
     r"\bsave (this|that)\b",
     r"\bmy (wife|husband|girlfriend|boyfriend|mother|father|friend) (likes|loves|prefers|enjoys)\b",
     r"\b(likes|loves|prefers|enjoys|dislikes|hates|avoids)\b",
+    r"\ballerg(?:y|ic)\b",
+    r"\b(?:cannot|can't|can not|should not|must not)\s+(?:eat|have|take)\b",
+    r"\b(?:only\s+can|can\s+only)\s+(?:eat|have|take)\b",
     r"\bmy budget is\b",
     r"\bremember .*budget\b",
 )
@@ -50,7 +53,58 @@ LOGISTICS_PATTERNS = (
     r"\btomorrow\b",
 )
 
-VALID_ROUTES = {"catalog_search", "preference_update", "logistics_check"}
+SMALLTALK_PATTERNS = (
+    r"^\s*(hi|hello|hey|yo|good morning|good afternoon|good evening)\b[\s!.?]*$",
+    r"^\s*(thanks|thank you|thx|bye|goodbye|see you)\b[\s!.?]*$",
+)
+
+IDENTITY_PATTERNS = (
+    r"\bwho are you\b",
+    r"\bwhat are you\b",
+    r"\bwhat can you do\b",
+    r"\bwhat do you do\b",
+    r"\bwho built you\b",
+    r"\byour purpose\b",
+    r"\bare you (a|an)\b",
+    r"\bcall you\b",
+    r"\bname you\b",
+)
+
+USER_NAME_PATTERNS = (
+    r"\bwhat is my name\b",
+    r"\bwhat's my name\b",
+    r"\bdo you know my name\b",
+    r"\bremember my name\b",
+)
+
+ORDER_STATUS_PATTERNS = (
+    r"\border status\b",
+    r"\bstatus of my order\b",
+    r"\bwhere is my order\b",
+    r"\btrack(ing)? my order\b",
+    r"\border number\b",
+    r"\bmy order\b",
+)
+
+UNCLEAR_PATTERNS = (
+    r"^\s*(ok|okay|hmm|huh|hmmm)\s*$",
+)
+
+SELF_INTRO_PATTERNS = (
+    r"^\s*(hi|hello|hey)\b.*\b(?:i am|i'm|im|my name is|call me)\b",
+    r"^\s*(?:i am|i'm|im)\s+(?!near\b|from\b|at\b|in\b|around\b)[a-z][a-z'-]{1,39}\b",
+    r"^\s*(?:my name is|call me)\s+[a-z][a-z'-]{1,39}\b",
+)
+
+VALID_ROUTES = {
+    "smalltalk",
+    "identity",
+    "catalog_search",
+    "preference_update",
+    "logistics_check",
+    "order_status",
+    "unclear",
+}
 RECIPIENT_RELATIONS = {
     "wife": ("Wife", "spouse"),
     "husband": ("Husband", "spouse"),
@@ -96,6 +150,9 @@ class KaprukaRouter:
 
     def route(self, user_message: str, memory_context: str = "") -> RouteDecision:
         text = user_message.strip()
+        stateless_decision = self._route_stateless(text)
+        if stateless_decision is not None:
+            return stateless_decision
         if self.client is not None and self._use_llm:
             try:
                 return self._route_with_llm(text, memory_context=memory_context)
@@ -107,24 +164,50 @@ class KaprukaRouter:
         """Extract lightweight preferences and notes from a user message."""
         text = user_message.strip()
         preferences: List[str] = []
+        constraints: List[str] = []
         notes: List[str] = []
+
+        normalized_text = self._normalize_preference_text(text)
 
         for keyword in ("likes", "loves", "prefers", "enjoys"):
             pattern = rf"\b{keyword}\b\s+([^.!?]+)"
-            for match in re.finditer(pattern, text, flags=re.IGNORECASE):
+            for match in re.finditer(pattern, normalized_text, flags=re.IGNORECASE):
                 fragment = match.group(1).strip(" -:")
                 for item in self._split_items(fragment):
                     cleaned = item.strip()
                     if cleaned:
                         preferences.append(f"{keyword.title()} {cleaned}")
 
-        if not preferences:
-            cleaned = re.sub(r"^(remember|note that)\s+", "", text, flags=re.IGNORECASE).strip()
+        for pattern in (
+            r"\b(?P<item>[a-z\s]+?)\s+(?:is|are)\s+(?:an?\s+)?allerg(?:y|ic)\b",
+            r"\ballerg(?:y|ic)\s+(?:to|for)\s+(?P<item>[a-z\s]+)",
+            r"\b(?:cannot|can't|can not|should not|must not)\s+(?:eat|have|take)\s+(?P<item>[a-z\s]+)",
+            r"\b(?:avoid|avoids|hates|dislikes)\s+(?P<item>[a-z\s]+)",
+        ):
+            for match in re.finditer(pattern, normalized_text, flags=re.IGNORECASE):
+                for cleaned in self._constraint_items(match.group("item").strip(" -:")):
+                    if cleaned:
+                        constraints.append(f"Avoids {cleaned}")
+
+        positive_allowed_match = re.search(
+            r"\b(?:only\s+can|can\s+only)\s+(?:eat|have|take)\s+(?P<item>[^.!?]+)",
+            normalized_text,
+            flags=re.IGNORECASE,
+        )
+        if positive_allowed_match:
+            for item in self._split_items(positive_allowed_match.group("item")):
+                cleaned = self._clean_preference_fragment(item)
+                if cleaned:
+                    preferences.append(f"Can eat {cleaned}")
+
+        if not preferences and not constraints:
+            cleaned = re.sub(r"^(remember|note that)\s+", "", normalized_text, flags=re.IGNORECASE).strip()
             if cleaned:
                 notes.append(cleaned)
 
         return {
             "preferences": self._dedupe(preferences),
+            "constraints": self._dedupe(constraints),
             "notes": self._dedupe(notes),
         }
 
@@ -144,10 +227,17 @@ class KaprukaRouter:
             lowered,
         )
         raw_name = name_match.group("name").strip() if name_match else ""
+        if not raw_name and relation:
+            relation_name_match = re.search(
+                rf"\bmy {relation}\s+(?!(?:likes|loves|prefers|enjoys|dislikes|hates|avoids|birthday)\b)(?P<name>[a-z][a-z-]{{1,40}})(?:'s)?\b",
+                lowered,
+            )
+            if relation_name_match:
+                raw_name = relation_name_match.group("name").strip()
 
         if raw_name:
             recipient_name = " ".join(part.capitalize() for part in raw_name.split())
-            recipient_id = re.sub(r"[^a-z0-9]+", "-", raw_name.lower()).strip("-")
+            recipient_id = relation or re.sub(r"[^a-z0-9]+", "-", raw_name.lower()).strip("-")
             relationship = RECIPIENT_RELATIONS.get(relation, ("", relation))[1] if relation else ""
             return {
                 "recipient_id": recipient_id,
@@ -169,6 +259,22 @@ class KaprukaRouter:
             "relationship": "",
         }
 
+    def extract_user_name(self, user_message: str) -> str:
+        """Extract the user's own name from self-introduction phrases when possible."""
+        text = user_message.strip()
+
+        patterns = (
+            r"\b(?:i am|i'm|im)\s+(?P<name>[A-Za-z][A-Za-z'-]{1,39})\b",
+            r"\bmy name is\s+(?P<name>[A-Za-z][A-Za-z'-]{1,39})\b",
+            r"\bcall me\s+(?P<name>[A-Za-z][A-Za-z'-]{1,39})\b",
+        )
+        for pattern in patterns:
+            match = re.search(pattern, text, flags=re.IGNORECASE)
+            if match:
+                raw_name = match.group("name").strip()
+                return raw_name[:1].upper() + raw_name[1:]
+        return ""
+
     def _route_with_llm(self, user_message: str, memory_context: str = "") -> RouteDecision:
         response = self.client.chat.completions.create(
             model=self.model,
@@ -185,7 +291,7 @@ class KaprukaRouter:
 
     def _parse_llm_response(self, content: str, user_message: str) -> RouteDecision:
         data = json.loads(content)
-        route = str(data.get("route", "")).strip()
+        route = str(data.get("intent") or data.get("route") or "").strip()
         if route not in VALID_ROUTES:
             raise ValueError(f"Invalid route from router LLM: {route}")
 
@@ -202,12 +308,47 @@ class KaprukaRouter:
         return RouteDecision(
             route=route,
             confidence=float(data.get("confidence", 0.75)),
-            reasoning=str(data.get("reasoning", "")).strip() or "LLM-based routing decision.",
+            reasoning=(
+                str(data.get("reason") or data.get("reasoning") or "").strip()
+                or "LLM-based routing decision."
+            ),
             params=normalized_params,
         )
 
     def _route_with_rules(self, user_message: str, memory_context: str = "") -> RouteDecision:
         lowered = user_message.lower()
+
+        if self._is_user_name_question(lowered):
+            return RouteDecision(
+                route="identity",
+                confidence=0.98,
+                reasoning="The user is asking whether their saved name is known.",
+                params={"message": user_message},
+            )
+
+        if self._is_identity_question(lowered):
+            return RouteDecision(
+                route="identity",
+                confidence=0.98,
+                reasoning="The user is asking who the assistant is or what it does.",
+                params={"message": user_message},
+            )
+
+        if self._is_smalltalk(lowered):
+            return RouteDecision(
+                route="smalltalk",
+                confidence=0.98,
+                reasoning="The message is a greeting, thanks, goodbye, or casual small talk.",
+                params={"message": user_message},
+            )
+
+        if self._is_order_status(lowered):
+            return RouteDecision(
+                route="order_status",
+                confidence=0.95,
+                reasoning="The user is asking about an existing order or tracking status.",
+                params={"message": user_message},
+            )
 
         if self._is_preference_update(lowered):
             return RouteDecision(
@@ -225,12 +366,49 @@ class KaprukaRouter:
                 params={"message": user_message},
             )
 
+        if self._is_unclear(lowered):
+            return RouteDecision(
+                route="unclear",
+                confidence=0.40,
+                reasoning="The message is too vague to confidently map to a specialist.",
+                params={"message": user_message},
+            )
+
         return RouteDecision(
             route="catalog_search",
             confidence=0.84,
             reasoning="The message is best handled as a Kapruka gift or product search request.",
             params={"query": user_message},
         )
+
+    def _route_stateless(self, user_message: str) -> Optional[RouteDecision]:
+        lowered = user_message.lower()
+
+        if self._is_user_name_question(lowered):
+            return RouteDecision(
+                route="identity",
+                confidence=0.99,
+                reasoning="The user is asking about their saved name.",
+                params={"message": user_message},
+            )
+
+        if self._is_identity_question(lowered):
+            return RouteDecision(
+                route="identity",
+                confidence=0.99,
+                reasoning="The user is asking an identity or capability question.",
+                params={"message": user_message},
+            )
+
+        if self._is_smalltalk(lowered):
+            return RouteDecision(
+                route="smalltalk",
+                confidence=0.99,
+                reasoning="The message is a greeting or self-introduction.",
+                params={"message": user_message},
+            )
+
+        return None
 
     def _is_preference_update(self, text: str) -> bool:
         if any(
@@ -273,6 +451,28 @@ class KaprukaRouter:
 
         return False
 
+    def _is_smalltalk(self, text: str) -> bool:
+        if self._is_identity_question(text):
+            return False
+        if self._is_self_introduction(text):
+            return True
+        return self._matches_any(text, SMALLTALK_PATTERNS)
+
+    def _is_identity_question(self, text: str) -> bool:
+        return self._matches_any(text, IDENTITY_PATTERNS)
+
+    def _is_user_name_question(self, text: str) -> bool:
+        return self._matches_any(text, USER_NAME_PATTERNS)
+
+    def _is_order_status(self, text: str) -> bool:
+        return self._matches_any(text, ORDER_STATUS_PATTERNS)
+
+    def _is_unclear(self, text: str) -> bool:
+        return self._matches_any(text, UNCLEAR_PATTERNS)
+
+    def _is_self_introduction(self, text: str) -> bool:
+        return self._matches_any(text, SELF_INTRO_PATTERNS)
+
     def _matches_any(self, text: str, patterns: tuple[str, ...]) -> bool:
         return any(re.search(pattern, text, flags=re.IGNORECASE) for pattern in patterns)
 
@@ -282,6 +482,41 @@ class KaprukaRouter:
             for item in re.split(r",| and | but |;", text, flags=re.IGNORECASE)
             if item.strip()
         ]
+
+    def _clean_preference_fragment(self, text: str) -> str:
+        cleaned = re.sub(r"\b(for|her|him|them|only|can|eat|have|take)\b", " ", text, flags=re.IGNORECASE)
+        cleaned = " ".join(cleaned.split()).strip(" .,:;-")
+        if not cleaned:
+            return ""
+        return cleaned[:1].upper() + cleaned[1:]
+
+    def _constraint_items(self, text: str) -> List[str]:
+        food_terms = self._food_terms(text)
+        if food_terms:
+            return [term[:1].upper() + term[1:] for term in sorted(food_terms)]
+        return [
+            cleaned
+            for item in self._split_items(text)
+            if (cleaned := self._clean_preference_fragment(item))
+        ]
+
+    def _food_terms(self, text: str) -> set[str]:
+        normalized = self._normalize_preference_text(text).lower()
+        terms = set()
+        for match in re.finditer(r"\b(?:dark|white|milk)?\s*chocolates?\b", normalized):
+            term = " ".join(match.group(0).split()).replace("chocolates", "chocolate")
+            terms.add(term)
+        return terms
+
+    def _normalize_preference_text(self, text: str) -> str:
+        return (
+            text.replace("chocaltes", "chocolates")
+            .replace("chocalates", "chocolates")
+            .replace("chocalte", "chocolate")
+            .replace("chocalate", "chocolate")
+            .replace("alergy", "allergy")
+            .replace("alergic", "allergic")
+        )
 
     def _dedupe(self, values: List[str]) -> List[str]:
         seen = set()

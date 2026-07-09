@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import re
 import time
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Optional
@@ -17,6 +16,7 @@ class CatalogAgentResult:
 
     query: str
     bundle: Dict[str, object]
+    memory_gate: Dict[str, object]
     answer: str
     timings_ms: Dict[str, int]
 
@@ -43,7 +43,6 @@ class CatalogAgent:
         progress_callback: Optional[Callable[[str], None]] = None,
     ) -> CatalogAgentResult:
         retrieval_started_at = time.perf_counter()
-        direct_product_query = self.memory_stack.is_direct_product_query(query)
 
         if progress_callback:
             progress_callback("Loading short-term memory...")
@@ -61,17 +60,27 @@ class CatalogAgent:
             semantic_ms = int((time.perf_counter() - semantic_started_at) * 1000)
 
         if progress_callback:
+            progress_callback("Evaluating memory relevance...")
+        gate_started_at = time.perf_counter()
+        memory_gate = self.memory_stack.decide_memory_reads(
+            user_id=user_id,
+            session_id=session_id,
+            query=query,
+            recipient_id=recipient_id,
+            recent_turns=recent_turns,
+            recipient_profile=recipient_profile,
+        )
+        gate_ms = int((time.perf_counter() - gate_started_at) * 1000)
+
+        if progress_callback:
             progress_callback("Building retrieval query...")
         query_started_at = time.perf_counter()
-        effective_query = query
-        if not direct_product_query:
-            enhanced_query = self.memory_stack._build_enhanced_query(
-                user_id=user_id,
-                session_id=session_id,
-                query=query,
-                recipient_id=recipient_id if self._profile_is_relevant(query, recipient_profile) else None,
-            )
-            effective_query = enhanced_query
+        effective_query = self.memory_stack.build_retrieval_query(
+            query=query,
+            recent_turns=recent_turns,
+            recipient_profile=recipient_profile,
+            decision=memory_gate,
+        )
         query_build_ms = int((time.perf_counter() - query_started_at) * 1000)
 
         if progress_callback:
@@ -86,7 +95,7 @@ class CatalogAgent:
         vector_total_ms = int((time.perf_counter() - vector_started_at) * 1000)
 
         bundle = {
-            "recent_turns": [] if direct_product_query else [turn.to_dict() for turn in recent_turns],
+            "recent_turns": [turn.to_dict() for turn in recent_turns] if memory_gate.use_short_term else [],
             "catalog_matches": [
                 {
                     "product_id": match.product_id,
@@ -95,7 +104,11 @@ class CatalogAgent:
                 }
                 for match in catalog_matches
             ],
-            "recipient_profile": None if direct_product_query else (recipient_profile.to_dict() if recipient_profile else None),
+            "recipient_profile": (
+                recipient_profile.to_dict()
+                if memory_gate.use_recipient_profile and recipient_profile
+                else None
+            ),
         }
         retrieval_ms = int((time.perf_counter() - retrieval_started_at) * 1000)
 
@@ -106,10 +119,12 @@ class CatalogAgent:
         return CatalogAgentResult(
             query=query,
             bundle=bundle,
+            memory_gate=memory_gate.to_dict(),
             answer=answer,
             timings_ms={
                 "short_term_read": short_term_ms,
                 "semantic_profile_read": semantic_ms,
+                "memory_relevance_gate": gate_ms,
                 "retrieval_query_build": query_build_ms,
                 "vector_search_total": vector_total_ms,
                 **vector_timings,
@@ -144,18 +159,3 @@ class CatalogAgent:
                 f"{product['availability']} - {product['url']}"
             )
         return "\n".join(lines)
-
-    def _profile_is_relevant(self, query: str, recipient_profile: Optional[object]) -> bool:
-        if recipient_profile is None:
-            return False
-
-        query_tokens = set(re.findall(r"[a-z0-9]+", query.lower()))
-        if query_tokens & {"gift", "wife", "husband", "girlfriend", "boyfriend", "anniversary", "birthday"}:
-            return True
-
-        profile_tokens = set()
-        profile_dict = recipient_profile.to_dict() if hasattr(recipient_profile, "to_dict") else {}
-        for value in profile_dict.get("preferences", []) + profile_dict.get("notes", []):
-            profile_tokens.update(re.findall(r"[a-z0-9]+", str(value).lower()))
-
-        return bool(query_tokens & profile_tokens)

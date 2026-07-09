@@ -14,12 +14,14 @@ if str(SRC_DIR) not in sys.path:
 
 from agents.catalog_agent import CatalogAgent
 from agents.logistics_agent import LogisticsAgent
+from agents.meta_agent import MetaAgent
 from agents.orchestrator import KaprukaOrchestrator
 from agents.router import KaprukaRouter
 from memory.memory_ops import CognitiveMemoryStack
 from memory.schemas import CatalogMatch, CatalogProduct
 from memory.semantic_store import SemanticProfileStore
 from memory.st_store import ShortTermMemoryStore
+from memory.user_store import UserProfileStore
 
 
 class FakeRouterClient:
@@ -42,6 +44,10 @@ class FakeRouterClient:
                 self.choices = [_Choice(content)]
 
         return _Response(self._content)
+
+
+class FakeLogisticsClient(FakeRouterClient):
+    pass
 
 
 class FakeLongTermStore:
@@ -75,11 +81,19 @@ class FakeChatService:
 class AgentTests(unittest.TestCase):
     def test_router_uses_llm_json_response(self) -> None:
         client = FakeRouterClient(
-            '{"route":"logistics_check","confidence":0.97,"reasoning":"Delivery question.","params":{"message":"Can you deliver this to Colombo today?"}}'
+            '{"intent":"logistics_check","confidence":0.97,"reason":"Delivery question.","params":{"message":"Can you deliver this to Colombo today?"}}'
         )
         decision = KaprukaRouter(llm_client=client).route("Can you deliver this to Colombo today?")
         self.assertEqual(decision.route, "logistics_check")
         self.assertEqual(decision.params["message"], "Can you deliver this to Colombo today?")
+
+    def test_router_classifies_identity(self) -> None:
+        decision = KaprukaRouter(use_llm=False).route("hi, who are you?")
+        self.assertEqual(decision.route, "identity")
+
+    def test_router_classifies_smalltalk(self) -> None:
+        decision = KaprukaRouter(use_llm=False).route("thanks!")
+        self.assertEqual(decision.route, "smalltalk")
 
     def test_router_classifies_preference_update(self) -> None:
         decision = KaprukaRouter(use_llm=False).route("Remember that my wife loves dark chocolate")
@@ -95,6 +109,19 @@ class AgentTests(unittest.TestCase):
         self.assertTrue(result.supported)
         self.assertTrue(result.needs_manual_confirmation)
         self.assertEqual(result.urgency, "same_day")
+        self.assertEqual(result.service_tier, "Tier 2")
+        self.assertIn("8:30 AM", result.cutoff_guidance)
+
+    def test_logistics_agent_uses_llm_json_response(self) -> None:
+        client = FakeLogisticsClient(
+            '{"district":"Colombo","supported":true,"needs_manual_confirmation":true,"urgency":"scheduled_soon","exact_guarantee_requested":true,"service_tier":"Tier 1","typical_timing":"Same-day for supported items","cutoff_guidance":"10:00 AM to 12:00 PM","item_guidance":"Fresh items require checkout confirmation.","summary":"Colombo is supported, but live confirmation is required."}'
+        )
+        result = LogisticsAgent(llm_client=client).check_delivery("Can you guarantee delivery to Colombo by tomorrow?")
+        self.assertEqual(result.district, "Colombo")
+        self.assertTrue(result.supported)
+        self.assertTrue(result.needs_manual_confirmation)
+        self.assertEqual(result.urgency, "scheduled_soon")
+        self.assertEqual(result.service_tier, "Tier 1")
 
     def test_logistics_agent_requires_district_when_missing(self) -> None:
         result = LogisticsAgent().check_delivery("Can you deliver this tomorrow?")
@@ -116,6 +143,32 @@ class AgentTests(unittest.TestCase):
         )
         self.assertEqual(result.district, "Gampaha")
         self.assertTrue(result.supported)
+
+    def test_logistics_agent_uses_tier_one_policy_for_colombo_same_day_cake(self) -> None:
+        result = LogisticsAgent().check_delivery("Can you deliver a birthday cake to Colombo today?")
+
+        self.assertEqual(result.district, "Colombo")
+        self.assertEqual(result.service_tier, "Tier 1")
+        self.assertTrue(result.needs_manual_confirmation)
+        self.assertIn("10:00 AM to 12:00 PM", result.summary)
+        self.assertIn("Perishables are most feasible", result.item_guidance)
+
+    def test_logistics_agent_warns_for_regional_perishable_items(self) -> None:
+        result = LogisticsAgent().check_delivery("Can you deliver a fresh cream cake to Jaffna?")
+
+        self.assertEqual(result.district, "Jaffna")
+        self.assertEqual(result.service_tier, "Tier 3")
+        self.assertTrue(result.needs_manual_confirmation)
+        self.assertIn("2 to 3 business days", result.typical_timing)
+        self.assertIn("generally restricted", result.item_guidance)
+
+    def test_logistics_agent_standard_retail_shipping_can_avoid_manual_confirmation(self) -> None:
+        result = LogisticsAgent().check_delivery("Can you deliver a speaker to Kurunegala?")
+
+        self.assertEqual(result.district, "Kurunegala")
+        self.assertEqual(result.service_tier, "Tier 3")
+        self.assertFalse(result.needs_manual_confirmation)
+        self.assertIn("standard courier", result.item_guidance)
 
     def test_router_uses_memory_context_for_logistics_follow_up(self) -> None:
         decision = KaprukaRouter(use_llm=False).route(
@@ -147,6 +200,104 @@ class AgentTests(unittest.TestCase):
             assert profile is not None
             self.assertIn("Loves dark chocolate", profile.preferences)
 
+    def test_orchestrator_handles_identity_without_short_term_storage(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            stack = CognitiveMemoryStack(
+                short_term=ShortTermMemoryStore(use_database=False),
+                long_term=FakeLongTermStore(),
+                user_store=UserProfileStore(Path(tmp_dir) / "user_profiles.json"),
+            )
+            orchestrator = KaprukaOrchestrator(
+                memory_stack=stack,
+                catalog_agent=CatalogAgent(memory_stack=stack, chat_service=FakeChatService()),
+                meta_agent=MetaAgent(use_llm=False),
+            )
+
+            response = orchestrator.handle_message("hi, who are you?")
+
+            self.assertEqual(response.route, "identity")
+            self.assertEqual(response.answer, "I am the Kapruka assistant.")
+            self.assertEqual(stack.recent_context("demo-user", "demo-session"), [])
+            self.assertNotIn("turn_storage", response.timings_ms)
+            self.assertEqual(response.specialist_output["meta"]["source"], "fallback")
+
+    def test_orchestrator_handles_greeting_with_short_reply(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            stack = CognitiveMemoryStack(
+                short_term=ShortTermMemoryStore(use_database=False),
+                long_term=FakeLongTermStore(),
+                user_store=UserProfileStore(Path(tmp_dir) / "user_profiles.json"),
+            )
+            orchestrator = KaprukaOrchestrator(
+                memory_stack=stack,
+                catalog_agent=CatalogAgent(memory_stack=stack, chat_service=FakeChatService()),
+                meta_agent=MetaAgent(use_llm=False),
+            )
+
+            response = orchestrator.handle_message("hi")
+
+            self.assertEqual(response.route, "smalltalk")
+            self.assertEqual(response.answer, "Hi. How can I help?")
+            self.assertEqual(stack.recent_context("demo-user", "demo-session"), [])
+
+    def test_orchestrator_remembers_user_name_from_intro(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            stack = CognitiveMemoryStack(
+                short_term=ShortTermMemoryStore(use_database=False),
+                long_term=FakeLongTermStore(),
+                user_store=UserProfileStore(Path(tmp_dir) / "user_profiles.json"),
+            )
+            orchestrator = KaprukaOrchestrator(
+                memory_stack=stack,
+                catalog_agent=CatalogAgent(memory_stack=stack, chat_service=FakeChatService()),
+                meta_agent=MetaAgent(use_llm=False),
+            )
+
+            response = orchestrator.handle_message("hi I'm Jaiya")
+
+            self.assertEqual(response.route, "smalltalk")
+            self.assertEqual(response.answer, "Hi, Jaiya. How can I help?")
+            profile = stack.get_user_profile("demo-user")
+            assert profile is not None
+            self.assertEqual(profile.name, "Jaiya")
+
+    def test_orchestrator_recalls_user_name(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            stack = CognitiveMemoryStack(
+                short_term=ShortTermMemoryStore(use_database=False),
+                long_term=FakeLongTermStore(),
+                user_store=UserProfileStore(Path(tmp_dir) / "user_profiles.json"),
+            )
+            stack.save_user_profile("demo-user", "Jaiya")
+            orchestrator = KaprukaOrchestrator(
+                memory_stack=stack,
+                catalog_agent=CatalogAgent(memory_stack=stack, chat_service=FakeChatService()),
+                meta_agent=MetaAgent(use_llm=False),
+            )
+
+            response = orchestrator.handle_message("what is my name?")
+
+            self.assertEqual(response.route, "identity")
+            self.assertEqual(response.answer, "Your name is Jaiya.")
+
+    def test_orchestrator_answers_assistant_call_name_contextually(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            stack = CognitiveMemoryStack(
+                short_term=ShortTermMemoryStore(use_database=False),
+                long_term=FakeLongTermStore(),
+                user_store=UserProfileStore(Path(tmp_dir) / "user_profiles.json"),
+            )
+            orchestrator = KaprukaOrchestrator(
+                memory_stack=stack,
+                catalog_agent=CatalogAgent(memory_stack=stack, chat_service=FakeChatService()),
+                meta_agent=MetaAgent(use_llm=False),
+            )
+
+            response = orchestrator.handle_message("Shall I call you kapruka then?")
+
+            self.assertEqual(response.route, "identity")
+            self.assertEqual(response.answer, "Yes, you can call me Kapruka.")
+
     def test_orchestrator_reuses_active_recipient_for_follow_up_preference(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             stack = CognitiveMemoryStack(
@@ -168,6 +319,63 @@ class AgentTests(unittest.TestCase):
             assert profile is not None
             self.assertIn("Loves dark chocolate", profile.preferences)
             self.assertIn("Prefers elegant packaging", profile.preferences)
+
+    def test_orchestrator_updates_active_recipient_with_pronoun_allergy_correction(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            stack = CognitiveMemoryStack(
+                short_term=ShortTermMemoryStore(use_database=False),
+                long_term=FakeLongTermStore(),
+                semantic=SemanticProfileStore(Path(tmp_dir) / "profiles.json"),
+            )
+            orchestrator = KaprukaOrchestrator(
+                memory_stack=stack,
+                catalog_agent=CatalogAgent(memory_stack=stack, chat_service=FakeChatService()),
+            )
+
+            first = orchestrator.handle_message("my wife loves dark chocolate")
+            second = orchestrator.handle_message(
+                "Actualy we found that dark chocaltes are alergy for her, only can eat white chocalates"
+            )
+
+            self.assertEqual(first.route, "preference_update")
+            self.assertEqual(second.route, "preference_update")
+            self.assertNotIn("need a recipient", second.answer.lower())
+            profile = stack.get_recipient_profile("wife")
+            assert profile is not None
+            self.assertNotIn("Loves dark chocolate", profile.preferences)
+            self.assertIn("Can eat White chocolates", profile.preferences)
+            self.assertIn("Avoids Dark chocolate", profile.constraints)
+
+    def test_catalog_search_sets_active_recipient_for_later_pronoun_update(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            stack = CognitiveMemoryStack(
+                short_term=ShortTermMemoryStore(use_database=False),
+                long_term=FakeLongTermStore(),
+                semantic=SemanticProfileStore(Path(tmp_dir) / "profiles.json"),
+            )
+            orchestrator = KaprukaOrchestrator(
+                memory_stack=stack,
+                catalog_agent=CatalogAgent(memory_stack=stack, chat_service=FakeChatService()),
+            )
+
+            first = orchestrator.handle_message("I need a gift for my wife")
+            second = orchestrator.handle_message("dark chocolates are allergy for her")
+
+            self.assertEqual(first.route, "catalog_search")
+            self.assertEqual(second.route, "preference_update")
+            self.assertNotIn("need a recipient", second.answer.lower())
+            profile = stack.get_recipient_profile("wife")
+            assert profile is not None
+            self.assertIn("Avoids Dark chocolate", profile.constraints)
+
+    def test_router_keeps_wife_id_when_name_is_given(self) -> None:
+        recipient = KaprukaRouter(use_llm=False).extract_recipient_reference(
+            "My wife Neth's birthday is coming on 20th July"
+        )
+
+        self.assertEqual(recipient["recipient_id"], "wife")
+        self.assertEqual(recipient["recipient_name"], "Neth")
+        self.assertEqual(recipient["relationship"], "spouse")
 
     def test_orchestrator_runs_catalog_specialist(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -199,6 +407,7 @@ class AgentTests(unittest.TestCase):
             self.assertIn("router", response.timings_ms)
             self.assertIn("short_term_read", response.timings_ms)
             self.assertIn("semantic_profile_read", response.timings_ms)
+            self.assertIn("memory_relevance_gate", response.timings_ms)
             self.assertIn("retrieval_query_build", response.timings_ms)
             self.assertIn("lexical_search", response.timings_ms)
             self.assertIn("query_embedding", response.timings_ms)
@@ -207,6 +416,7 @@ class AgentTests(unittest.TestCase):
             self.assertIn("catalog_retrieval", response.timings_ms)
             self.assertIn("catalog_answer_generation", response.timings_ms)
             self.assertIn("total", response.timings_ms)
+            self.assertTrue(response.specialist_output["catalog"]["memory_gate"]["use_recipient_profile"])
 
     def test_orchestrator_does_not_inject_default_wife_profile(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -224,6 +434,7 @@ class AgentTests(unittest.TestCase):
 
             self.assertEqual(response.route, "catalog_search")
             self.assertIsNone(response.specialist_output["catalog"]["bundle"]["recipient_profile"])
+            self.assertFalse(response.specialist_output["catalog"]["memory_gate"]["use_recipient_profile"])
 
     def test_direct_product_query_ignores_recent_turn_context_in_bundle(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -242,6 +453,8 @@ class AgentTests(unittest.TestCase):
 
             self.assertEqual(response.route, "catalog_search")
             self.assertEqual(response.specialist_output["catalog"]["bundle"]["recent_turns"], [])
+            self.assertTrue(response.specialist_output["catalog"]["memory_gate"]["topic_shifted"])
+            self.assertFalse(response.specialist_output["catalog"]["memory_gate"]["use_short_term"])
 
 
 if __name__ == "__main__":

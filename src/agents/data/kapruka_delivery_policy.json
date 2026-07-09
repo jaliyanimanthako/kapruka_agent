@@ -1,0 +1,115 @@
+{
+  "delivery_options": [
+    {
+      "name": "Same-Day Delivery",
+      "target_areas": "Colombo Metro and immediate Western Province suburbs",
+      "timing": "Usually available before the local cutoff, commonly 10:00 AM to 12:00 PM. Later orders usually move to next-day handling.",
+      "best_used_for": "Fresh cakes, flowers, groceries, and last-minute gift sets",
+      "live_confirmation_required": true
+    },
+    {
+      "name": "Standard Delivery",
+      "target_areas": "Island-wide major provincial capitals and regional districts",
+      "timing": "Usually 1 to 3 business days depending on distance from the Colombo fulfillment hub.",
+      "best_used_for": "Packaged items, electronics, clothing, and non-perishable goods",
+      "live_confirmation_required": false
+    },
+    {
+      "name": "Scheduled Delivery",
+      "target_areas": "Supported regions island-wide",
+      "timing": "Customer selects a delivery date at checkout, subject to item and address support.",
+      "best_used_for": "Birthdays, anniversaries, celebration cakes, and customized gift hampers",
+      "live_confirmation_required": true
+    },
+    {
+      "name": "Midnight / Specific-Time Delivery",
+      "target_areas": "Primarily Colombo and selected suburbs",
+      "timing": "Requires hotline or live coordination and may carry a surcharge.",
+      "best_used_for": "Surprise anniversary or birthday gifts",
+      "live_confirmation_required": true
+    }
+  ],
+  "general_policies": [
+    "Standard deliveries are typically routed before 5:30 PM, but exact hour-by-hour guarantees are not standard.",
+    "Preferred timeframes can be requested, but exact slots require live confirmation.",
+    "Couriers may call the recipient before delivery to verify availability.",
+    "Failed delivery because the recipient is unavailable can result in an extra charge for a second attempt, especially for perishable goods.",
+    "Cash on Delivery, cards, bank transfers, and digital wallets may be available depending on checkout eligibility.",
+    "Delivery charges are dynamic and calculated at checkout from the item, destination, and distance."
+  ],
+  "tiers": [
+    {
+      "name": "Tier 1",
+      "label": "Western Province priority coverage",
+      "districts": ["Colombo", "Gampaha", "Kalutara"],
+      "timing": "Highest same-day reliability for many supported products when ordered before cutoff.",
+      "same_day_guidance": "Same-day is commonly available for supported products, especially fresh cakes, flowers, groceries, and gift sets.",
+      "cutoff_guidance": "Typical same-day cutoff is around 10:00 AM to 12:00 PM.",
+      "perishable_guidance": "Perishables are most feasible in this tier, subject to item availability and checkout confirmation."
+    },
+    {
+      "name": "Tier 2",
+      "label": "Major provincial hubs",
+      "districts": ["Kandy", "Galle", "Matara"],
+      "timing": "Fast standard delivery, often 1 to 2 days. Selected same-day may be possible only for specific items and early orders.",
+      "same_day_guidance": "Same-day is limited and usually needs very early ordering and live confirmation.",
+      "cutoff_guidance": "If same-day is possible, cutoff may be earlier, around 8:30 AM to 10:00 AM.",
+      "perishable_guidance": "Fresh or sensitive items need item-level confirmation before promising delivery."
+    },
+    {
+      "name": "Tier 3",
+      "label": "Island-wide and regional capitals",
+      "districts": [
+        "Jaffna",
+        "Vavuniya",
+        "Trincomalee",
+        "Anuradhapura",
+        "Polonnaruwa",
+        "Batticaloa",
+        "Ampara",
+        "Badulla",
+        "Monaragala",
+        "Hambantota",
+        "Matale",
+        "Nuwara Eliya",
+        "Kegalle",
+        "Ratnapura",
+        "Kurunegala",
+        "Puttalam",
+        "Mannar",
+        "Kilinochchi",
+        "Mullaitivu"
+      ],
+      "timing": "Usually 2 to 3 business days for standard shipping.",
+      "same_day_guidance": "Same-day should not be assumed in this tier.",
+      "cutoff_guidance": "Regional delivery timing depends on item and checkout routing.",
+      "perishable_guidance": "Warm restaurant food and sensitive fresh cream cakes are generally restricted or unavailable."
+    }
+  ],
+  "sensitive_item_keywords": [
+    "cake",
+    "cakes",
+    "fresh cream",
+    "flower",
+    "flowers",
+    "bouquet",
+    "restaurant",
+    "warm food",
+    "food",
+    "pastry",
+    "pastries",
+    "grocery",
+    "groceries"
+  ],
+  "retail_item_keywords": [
+    "electronics",
+    "tv",
+    "television",
+    "speaker",
+    "clothing",
+    "watch",
+    "toy",
+    "book",
+    "perfume"
+  ]
+}

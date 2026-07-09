@@ -27,6 +27,7 @@ Rules:
 - USER_QUERY has the highest priority. If it asks for a specific product type or category, follow that first.
 - Base recommendations only on the provided catalog matches.
 - If profile preferences exist, use them only when they do not conflict with the current USER_QUERY.
+- Treat profile constraints, allergies, and avoids as hard exclusions when explaining recommendations.
 - Explain briefly why each suggestion matches the user and recipient context.
 - If the catalog matches are weak or unrelated, say that clearly.
 - Do not claim the catalog lacks a product type if relevant catalog matches are present.
@@ -89,8 +90,10 @@ def build_memory_prompt(query: str, bundle: Dict[str, object]) -> str:
         lines.append(f"- name: {recipient_profile.get('name', '')}")
         lines.append(f"- relationship: {recipient_profile.get('relationship', '')}")
         preferences = recipient_profile.get("preferences", [])
+        constraints = recipient_profile.get("constraints", [])
         notes = recipient_profile.get("notes", [])
         lines.append(f"- preferences: {', '.join(preferences) if preferences else 'none'}")
+        lines.append(f"- constraints: {', '.join(constraints) if constraints else 'none'}")
         lines.append(f"- notes: {', '.join(notes) if notes else 'none'}")
     else:
         lines.append("- none")
