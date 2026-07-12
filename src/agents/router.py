@@ -8,7 +8,12 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 from agents.logistics_agent import SRI_LANKAN_DISTRICTS
-from agents.prompts.agent_prompts import build_router_policy_prompt, build_router_user_prompt
+from agents.prompts.agent_prompts import (
+    build_profile_update_guard_policy_prompt,
+    build_profile_update_guard_user_prompt,
+    build_router_policy_prompt,
+    build_router_user_prompt,
+)
 from infastructure.config import OPENAI_API_KEY, OPENAI_CHAT_MAX_TOKENS, OPENAI_CHAT_MODEL
 
 try:
@@ -157,6 +162,7 @@ class KaprukaRouter:
         self.model = model
         self.max_tokens = max_tokens
         self._use_llm = use_llm
+        self.profile_update_guard_prompt = build_profile_update_guard_policy_prompt()
 
         if llm_client is not None:
             self.client = llm_client
@@ -167,15 +173,19 @@ class KaprukaRouter:
 
     def route(self, user_message: str, memory_context: str = "") -> RouteDecision:
         text = user_message.strip()
-        stateless_decision = self._route_stateless(text)
-        if stateless_decision is not None:
-            return stateless_decision
+        if not memory_context:
+            stateless_decision = self._route_stateless(text)
+            if stateless_decision is not None:
+                return self._postprocess_decision(text, stateless_decision)
         if self.client is not None and self._use_llm:
             try:
-                return self._route_with_llm(text, memory_context=memory_context)
+                return self._postprocess_decision(
+                    text,
+                    self._route_with_llm(text, memory_context=memory_context),
+                )
             except Exception:
                 pass
-        return self._route_with_rules(text, memory_context=memory_context)
+        return self._postprocess_decision(text, self._route_with_rules(text, memory_context=memory_context))
 
     def extract_preferences(self, user_message: str) -> Dict[str, List[str]]:
         """Extract lightweight preferences and notes from a user message."""
@@ -218,7 +228,12 @@ class KaprukaRouter:
                     preferences.append(f"Can eat {cleaned}")
 
         if not preferences and not constraints:
-            cleaned = re.sub(r"^(remember|note that)\s+", "", normalized_text, flags=re.IGNORECASE).strip()
+            cleaned = re.sub(
+                r"^(remember(?:\s+that)?|note\s+that|keep\s+in\s+mind(?:\s+that)?|save\s+(?:this|that))\s+",
+                "",
+                normalized_text,
+                flags=re.IGNORECASE,
+            ).strip()
             if cleaned:
                 notes.append(cleaned)
 
@@ -227,6 +242,64 @@ class KaprukaRouter:
             "constraints": self._dedupe(constraints),
             "notes": self._dedupe(notes),
         }
+
+    def should_persist_profile_update(
+        self,
+        user_message: str,
+        extracted: Dict[str, List[str]],
+    ) -> bool:
+        """Decide whether a routed preference update should actually mutate profile memory."""
+        llm_decision = self._judge_profile_update_persistence(user_message=user_message, extracted=extracted)
+        if llm_decision is not None:
+            return llm_decision
+
+        if extracted.get("preferences") or extracted.get("constraints"):
+            return True
+
+        notes = extracted.get("notes", [])
+        if not notes:
+            return False
+
+        lowered = user_message.lower()
+        if self._has_explicit_memory_intent(lowered):
+            return True
+        if self._looks_like_note_worthy_profile_fact(lowered):
+            return True
+        return False
+
+    def _judge_profile_update_persistence(
+        self,
+        user_message: str,
+        extracted: Dict[str, List[str]],
+    ) -> Optional[bool]:
+        if self.client is None or not self._use_llm:
+            return None
+
+        try:
+            response = self.client.chat.completions.create(
+                model=self.model,
+                temperature=0,
+                max_tokens=min(self.max_tokens, 120),
+                messages=[
+                    {"role": "system", "content": self.profile_update_guard_prompt},
+                    {
+                        "role": "user",
+                        "content": build_profile_update_guard_user_prompt(
+                            user_message=user_message,
+                            extracted=extracted,
+                        ),
+                    },
+                ],
+                response_format={"type": "json_object"},
+            )
+            content = response.choices[0].message.content or "{}"
+            data = json.loads(content)
+        except Exception:
+            return None
+
+        if "should_persist" not in data:
+            return None
+        return bool(data.get("should_persist"))
 
     def extract_recipient_reference(self, user_message: str) -> Dict[str, str]:
         """Infer recipient identity from the current message when possible."""
@@ -332,6 +405,20 @@ class KaprukaRouter:
             params=normalized_params,
         )
 
+    def _postprocess_decision(self, user_message: str, decision: RouteDecision) -> RouteDecision:
+        lowered = user_message.lower()
+        if decision.route == "preference_update" and self._looks_like_recommendation_feedback(lowered):
+            return RouteDecision(
+                route="catalog_search",
+                confidence=max(decision.confidence, 0.90),
+                reasoning=(
+                    "The message is steering product suggestions toward different items, "
+                    "so it should be handled as catalog search instead of a memory update."
+                ),
+                params={"query": user_message},
+            )
+        return decision
+
     def _route_with_rules(self, user_message: str, memory_context: str = "") -> RouteDecision:
         lowered = user_message.lower()
 
@@ -348,6 +435,14 @@ class KaprukaRouter:
                 route="identity",
                 confidence=0.98,
                 reasoning="The user is asking who the assistant is or what it does.",
+                params={"message": user_message},
+            )
+
+        if self._is_logistics_question(lowered, memory_context=memory_context):
+            return RouteDecision(
+                route="logistics_check",
+                confidence=0.92,
+                reasoning="The user is asking about delivery location, timing, or feasibility in Sri Lanka.",
                 params={"message": user_message},
             )
 
@@ -380,14 +475,6 @@ class KaprukaRouter:
                 route="preference_update",
                 confidence=0.94,
                 reasoning="The user is providing recipient preferences or memory-worthy profile details.",
-                params={"message": user_message},
-            )
-
-        if self._is_logistics_question(lowered, memory_context=memory_context):
-            return RouteDecision(
-                route="logistics_check",
-                confidence=0.90,
-                reasoning="The user is asking about delivery location, timing, or feasibility in Sri Lanka.",
                 params={"message": user_message},
             )
 
@@ -425,6 +512,14 @@ class KaprukaRouter:
                 params={"message": user_message},
             )
 
+        if self._is_logistics_question(lowered):
+            return RouteDecision(
+                route="logistics_check",
+                confidence=0.92,
+                reasoning="The message explicitly mentions delivery or location logistics.",
+                params={"message": user_message},
+            )
+
         if self._is_product_search(lowered):
             return RouteDecision(
                 route="catalog_search",
@@ -458,6 +553,43 @@ class KaprukaRouter:
         ):
             return False
         return self._matches_any(text, PREFERENCE_PATTERNS)
+
+    def _has_explicit_memory_intent(self, text: str) -> bool:
+        return bool(
+            re.search(
+                r"\b(remember|note that|keep in mind|save this|save that|remember .*budget)\b",
+                text,
+            )
+        )
+
+    def _looks_like_note_worthy_profile_fact(self, text: str) -> bool:
+        if "budget" in text:
+            return True
+        if re.search(r"\b(birthday|anniversary)\b", text) and re.search(r"\b(on|is|coming)\b", text):
+            return True
+        return False
+
+    def _looks_like_recommendation_feedback(self, text: str) -> bool:
+        if self._has_explicit_memory_intent(text):
+            return False
+        if not re.search(
+            (
+                r"\b("
+                r"suit better|would suit|may suit|might suit|could suit|"
+                r"better fit|better option|instead|"
+                r"would prefer|prefer more|like more|love more|"
+                r"more into|rather have|rather get"
+                r")\b"
+            ),
+            text,
+        ):
+            return False
+        return bool(
+            re.search(
+                r"\b(item|items|tool|tools|toolbox|tool box|electronic|electronics|gadget|gadgets|gift|gifts)\b",
+                text,
+            )
+        )
 
     def _is_product_search(self, text: str) -> bool:
         return self._matches_any(text, PRODUCT_SEARCH_PATTERNS)

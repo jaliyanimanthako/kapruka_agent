@@ -133,6 +133,8 @@ class KaprukaOrchestrator:
                 recipient_id=effective_recipient_id,
                 recipient_name=effective_recipient_name,
                 relationship=effective_relationship,
+                top_k=top_k,
+                score_threshold=score_threshold,
                 route_ms=route_ms,
                 total_started_at=total_started_at,
                 progress_callback=progress_callback,
@@ -172,11 +174,33 @@ class KaprukaOrchestrator:
         recipient_id: Optional[str],
         recipient_name: str,
         relationship: str,
+        top_k: int,
+        score_threshold: float,
         route_ms: int,
         total_started_at: float,
         progress_callback: Optional[Callable[[str], None]] = None,
     ) -> OrchestratorResponse:
         self._progress(progress_callback, "Updating semantic profile...")
+        extracted = self.router.extract_preferences(user_message)
+        if not self.router.should_persist_profile_update(user_message, extracted):
+            self._progress(progress_callback, "Reinterpreting as catalog search...")
+            return self._handle_catalog_search(
+                query=user_message,
+                decision=RouteDecision(
+                    route="catalog_search",
+                    confidence=max(decision.confidence, self.ROUTER_CONFIDENCE_FLOOR),
+                    reasoning="The message is better handled as product guidance than a profile-memory update.",
+                    params={"query": user_message},
+                ),
+                user_id=user_id,
+                session_id=session_id,
+                recipient_id=recipient_id,
+                top_k=top_k,
+                score_threshold=score_threshold,
+                route_ms=route_ms,
+                total_started_at=total_started_at,
+                progress_callback=progress_callback,
+            )
         if not recipient_id:
             answer = "I can save preferences, but I need a recipient id or name first, for example `wife`, `friend`, or `mother`."
             self._progress(progress_callback, "Storing short-term turns...")
@@ -198,7 +222,6 @@ class KaprukaOrchestrator:
             )
 
         specialist_started_at = time.perf_counter()
-        extracted = self.router.extract_preferences(user_message)
         profile = self.memory_stack.save_recipient_profile(
             recipient_id=recipient_id,
             name=recipient_name,
