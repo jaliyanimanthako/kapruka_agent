@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Dict
+from typing import Dict, List
 
 
 KAPRUKA_ROUTER_SYSTEM_PROMPT = """You are an intent router for a Kapruka shopping and logistics assistant.
@@ -71,6 +71,20 @@ Rules:
 - Do not pretend live order tracking, payment, or courier dispatch is connected.
 """
 
+KAPRUKA_PROFILE_UPDATE_GUARD_PROMPT = """You decide whether a user message should be saved into a recipient profile.
+
+Your job is not to route the whole message. Your job is only to decide whether this specific message should mutate profile memory.
+
+Rules:
+- Save only stable recipient facts, preferences, constraints, budgets, style notes, or special dates.
+- Do not save transient product-search steering, recommendation feedback, or corrections to the current suggestion list.
+- Statements like "she would like electronics more" or "tool boxes may suit better" are usually recommendation feedback unless the user is clearly defining a lasting preference.
+- If extracted structured preferences or constraints are present, that strongly supports saving.
+- If the message is only a loose note, save it only when it is clearly a lasting profile fact.
+
+Return JSON only.
+"""
+
 
 def build_router_policy_prompt() -> str:
     """Return the router system prompt for future LLM-based routing."""
@@ -80,6 +94,11 @@ def build_router_policy_prompt() -> str:
 def build_meta_policy_prompt() -> str:
     """Return the meta specialist system prompt."""
     return KAPRUKA_META_POLICY_PROMPT
+
+
+def build_profile_update_guard_policy_prompt() -> str:
+    """Return the system prompt for deciding whether a profile write should persist."""
+    return KAPRUKA_PROFILE_UPDATE_GUARD_PROMPT
 
 
 def build_meta_user_prompt(
@@ -122,6 +141,26 @@ def build_router_user_prompt(user_message: str, memory_context: str = "") -> str
         "}\n\n"
         f"RECENT CONTEXT:\n{memory_context or '(none)'}\n\n"
         f"USER MESSAGE:\n{user_message}"
+    )
+
+
+def build_profile_update_guard_user_prompt(
+    user_message: str,
+    extracted: Dict[str, List[str]],
+) -> str:
+    """Return the user prompt for deciding whether a profile update should persist."""
+    return (
+        "Decide whether this message should be written into recipient profile memory.\n\n"
+        "Return this schema exactly:\n"
+        '{\n'
+        '  "should_persist": <true|false>,\n'
+        '  "kind": "<preference|constraint|profile_fact|budget|special_date|recommendation_feedback|other>",\n'
+        '  "reason": "<short reason>"\n'
+        "}\n\n"
+        f"USER MESSAGE:\n{user_message}\n\n"
+        f"EXTRACTED_PREFERENCES: {extracted.get('preferences', [])}\n"
+        f"EXTRACTED_CONSTRAINTS: {extracted.get('constraints', [])}\n"
+        f"EXTRACTED_NOTES: {extracted.get('notes', [])}\n"
     )
 
 

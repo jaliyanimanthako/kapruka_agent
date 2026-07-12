@@ -50,6 +50,35 @@ class FakeLogisticsClient(FakeRouterClient):
     pass
 
 
+class FakeRouterGuardClient:
+    def __init__(self, route_content: str, guard_content: str) -> None:
+        self._route_content = route_content
+        self._guard_content = guard_content
+        self.chat = self
+        self.completions = self
+
+    def create(self, **kwargs):
+        messages = kwargs.get("messages", [])
+        system_prompt = ""
+        if messages:
+            system_prompt = str(messages[0].get("content", ""))
+        content = self._guard_content if "should be saved into a recipient profile" in system_prompt else self._route_content
+
+        class _Message:
+            def __init__(self, content: str) -> None:
+                self.content = content
+
+        class _Choice:
+            def __init__(self, content: str) -> None:
+                self.message = _Message(content)
+
+        class _Response:
+            def __init__(self, content: str) -> None:
+                self.choices = [_Choice(content)]
+
+        return _Response(content)
+
+
 class FakeLongTermStore:
     def ingest_catalog(self, catalog_path: str | Path = "catalog.json") -> int:
         return 0
@@ -143,6 +172,61 @@ class FakeChatService:
     def answer_query(self, query: str, bundle: dict) -> str:
         return f"stubbed answer for: {query} ({len(bundle.get('catalog_matches', []))} match)"
 
+    def judge_answer_relevance(self, query: str, bundle: dict, answer: str) -> dict:
+        return {
+            "relevant": True,
+            "confidence": 0.95,
+            "reason": "The draft answer stays within the retrieved catalog context.",
+            "supported_products": [],
+            "unsupported_products": [],
+            "mentioned_products": [],
+        }
+
+
+class FakeFurnitureHallucinatingChatService:
+    def answer_query(self, query: str, bundle: dict) -> str:
+        return (
+            "Here are some furniture options available in the catalog that might interest you:\n\n"
+            "1. Queen Of My World Gift Set\n"
+            "Price: US$41.22\n"
+            "Description: This gift set celebrates the most special woman in your life.\n"
+            "Availability: In Stock\n"
+            "- Why it matches: While not traditional furniture, this gift set can enhance the ambiance of a living space.\n\n"
+            "2. Ferrero Rocher Heart Bouquet For Her\n"
+            "Price: US$20.00\n"
+            "Description: Chocolate bouquet gift for romantic occasions.\n"
+            "Availability: In Stock\n"
+            "- Why it matches: While not furniture, it can add charm to the home environment."
+        )
+
+    def judge_answer_relevance(self, query: str, bundle: dict, answer: str) -> dict:
+        return {
+            "relevant": False,
+            "confidence": 0.98,
+            "reason": "The mentioned products are not furniture and the answer relies on weak decor justifications.",
+            "supported_products": [],
+            "unsupported_products": ["Ferrero Rocher Heart Bouquet For Her"],
+            "mentioned_products": ["Ferrero Rocher Heart Bouquet For Her"],
+        }
+
+
+class FakeFatherGiftChatService:
+    def answer_query(self, query: str, bundle: dict) -> str:
+        return (
+            "A good option for your father is Ferrero Rocher Heart Bouquet For Her.\n"
+            "It is in stock and works as a thoughtful present."
+        )
+
+    def judge_answer_relevance(self, query: str, bundle: dict, answer: str) -> dict:
+        return {
+            "relevant": True,
+            "confidence": 0.82,
+            "reason": "This is a broad gift-discovery request and the recommendation is acceptable from the retrieved catalog.",
+            "supported_products": ["Ferrero Rocher Heart Bouquet For Her"],
+            "unsupported_products": [],
+            "mentioned_products": ["Ferrero Rocher Heart Bouquet For Her"],
+        }
+
 
 class AgentTests(unittest.TestCase):
     def test_router_uses_llm_json_response(self) -> None:
@@ -164,6 +248,26 @@ class AgentTests(unittest.TestCase):
     def test_router_classifies_preference_update(self) -> None:
         decision = KaprukaRouter(use_llm=False).route("Remember that my wife loves dark chocolate")
         self.assertEqual(decision.route, "preference_update")
+
+    def test_router_corrects_llm_preference_misroute_for_recommendation_feedback(self) -> None:
+        client = FakeRouterClient(
+            '{"intent":"preference_update","confidence":0.96,"reason":"The user is sharing a recipient note.","params":{"message":"But I think some electronic items or any tool boxes may suit better"}}'
+        )
+        decision = KaprukaRouter(llm_client=client).route(
+            "But I think some electronic items or any tool boxes may suit better"
+        )
+
+        self.assertEqual(decision.route, "catalog_search")
+
+    def test_router_corrects_llm_preference_misroute_for_love_more_feedback(self) -> None:
+        client = FakeRouterClient(
+            '{"intent":"preference_update","confidence":0.96,"reason":"The user is sharing a recipient note.","params":{"message":"I think she will love more to get some electronic items"}}'
+        )
+        decision = KaprukaRouter(llm_client=client).route(
+            "I think she will love more to get some electronic items"
+        )
+
+        self.assertEqual(decision.route, "catalog_search")
 
     def test_router_classifies_logistics(self) -> None:
         decision = KaprukaRouter(use_llm=False).route("Can you deliver this to Colombo today?")
@@ -248,8 +352,20 @@ class AgentTests(unittest.TestCase):
         )
         self.assertEqual(decision.route, "logistics_check")
 
+    def test_router_uses_memory_context_for_delivery_follow_up_with_i_need_phrase(self) -> None:
+        decision = KaprukaRouter(use_llm=False).route(
+            "I need to deliver it to Gampaha",
+            memory_context="user: what are the delivery options you got\nassistant: Please provide your district or city area for specific delivery options.",
+        )
+        self.assertEqual(decision.route, "logistics_check")
+
     def test_router_routes_known_location_without_memory_context(self) -> None:
         decision = KaprukaRouter(use_llm=False).route("i am near kelaniya")
+
+        self.assertEqual(decision.route, "logistics_check")
+
+    def test_router_routes_delivery_request_with_i_need_phrase_without_memory_context(self) -> None:
+        decision = KaprukaRouter(use_llm=False).route("I need to deliver it to Gampaha")
 
         self.assertEqual(decision.route, "logistics_check")
 
@@ -284,6 +400,25 @@ class AgentTests(unittest.TestCase):
 
             self.assertEqual(response.route, "logistics_check")
             self.assertEqual(response.specialist_output["logistics"]["district"], "Gampaha")
+
+    def test_orchestrator_keeps_delivery_follow_up_in_logistics_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            stack = CognitiveMemoryStack(
+                short_term=ShortTermMemoryStore(use_database=False),
+                long_term=FakeLongTermStore(),
+                semantic=SemanticProfileStore(Path(tmp_dir) / "profiles.json"),
+            )
+            orchestrator = KaprukaOrchestrator(
+                memory_stack=stack,
+                catalog_agent=CatalogAgent(memory_stack=stack, chat_service=FakeChatService()),
+            )
+
+            first = orchestrator.handle_message("what are the delivery options you got")
+            second = orchestrator.handle_message("I need to deliver it to Gampaha")
+
+            self.assertEqual(first.route, "logistics_check")
+            self.assertEqual(second.route, "logistics_check")
+            self.assertEqual(second.specialist_output["logistics"]["district"], "Gampaha")
 
     def test_orchestrator_updates_semantic_profile(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -500,6 +635,157 @@ class AgentTests(unittest.TestCase):
             assert profile is not None
             self.assertIn("Avoids Dark chocolate", profile.constraints)
 
+    def test_orchestrator_does_not_save_recommendation_feedback_as_profile_note(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            stack = CognitiveMemoryStack(
+                short_term=ShortTermMemoryStore(use_database=False),
+                long_term=FakeLongTermStore(),
+                semantic=SemanticProfileStore(Path(tmp_dir) / "profiles.json"),
+            )
+            router = KaprukaRouter(
+                llm_client=FakeRouterClient(
+                    '{"intent":"preference_update","confidence":0.96,"reason":"The user is sharing a recipient note.","params":{"message":"But I think some electronic items or any tool boxes may suit better"}}'
+                )
+            )
+            orchestrator = KaprukaOrchestrator(
+                memory_stack=stack,
+                router=router,
+                catalog_agent=CatalogAgent(memory_stack=stack, chat_service=FakeChatService()),
+            )
+
+            response = orchestrator.handle_message(
+                "But I think some electronic items or any tool boxes may suit better",
+                recipient_id="father",
+                recipient_name="Father",
+                relationship="parent",
+            )
+
+            self.assertEqual(response.route, "catalog_search")
+            self.assertIsNone(stack.get_recipient_profile("father"))
+            self.assertNotIn("updated father's profile", response.answer.lower())
+
+    def test_orchestrator_does_not_save_love_more_feedback_as_profile_note(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            stack = CognitiveMemoryStack(
+                short_term=ShortTermMemoryStore(use_database=False),
+                long_term=FakeLongTermStore(),
+                semantic=SemanticProfileStore(Path(tmp_dir) / "profiles.json"),
+            )
+            router = KaprukaRouter(
+                llm_client=FakeRouterClient(
+                    '{"intent":"preference_update","confidence":0.96,"reason":"The user is sharing a recipient note.","params":{"message":"I think she will love more to get some electronic items"}}'
+                )
+            )
+            orchestrator = KaprukaOrchestrator(
+                memory_stack=stack,
+                router=router,
+                catalog_agent=CatalogAgent(memory_stack=stack, chat_service=FakeChatService()),
+            )
+
+            response = orchestrator.handle_message(
+                "I think she will love more to get some electronic items",
+                recipient_id="girlfriend",
+                recipient_name="Girlfriend",
+                relationship="partner",
+            )
+
+            self.assertEqual(response.route, "catalog_search")
+            self.assertIsNone(stack.get_recipient_profile("girlfriend"))
+            self.assertNotIn("updated girlfriend's profile", response.answer.lower())
+
+    def test_orchestrator_blocks_note_only_misroute_at_profile_write_boundary(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            stack = CognitiveMemoryStack(
+                short_term=ShortTermMemoryStore(use_database=False),
+                long_term=FakeLongTermStore(),
+                semantic=SemanticProfileStore(Path(tmp_dir) / "profiles.json"),
+            )
+            router = KaprukaRouter(
+                llm_client=FakeRouterGuardClient(
+                    route_content='{"intent":"preference_update","confidence":0.96,"reason":"The user is sharing a recipient note.","params":{"message":"I think she would really enjoy some electronic items"}}',
+                    guard_content='{"should_persist":false,"kind":"recommendation_feedback","reason":"This is steering the current recommendation, not stating a lasting profile fact."}',
+                )
+            )
+            orchestrator = KaprukaOrchestrator(
+                memory_stack=stack,
+                router=router,
+                catalog_agent=CatalogAgent(memory_stack=stack, chat_service=FakeChatService()),
+            )
+
+            response = orchestrator.handle_message(
+                "I think she would really enjoy some electronic items",
+                recipient_id="girlfriend",
+                recipient_name="Girlfriend",
+                relationship="partner",
+            )
+
+            self.assertEqual(response.route, "catalog_search")
+            self.assertIsNone(stack.get_recipient_profile("girlfriend"))
+            self.assertNotIn("updated girlfriend's profile", response.answer.lower())
+
+    def test_orchestrator_allows_natural_note_only_profile_update_via_guard(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            stack = CognitiveMemoryStack(
+                short_term=ShortTermMemoryStore(use_database=False),
+                long_term=FakeLongTermStore(),
+                semantic=SemanticProfileStore(Path(tmp_dir) / "profiles.json"),
+            )
+            router = KaprukaRouter(
+                llm_client=FakeRouterGuardClient(
+                    route_content='{"intent":"preference_update","confidence":0.96,"reason":"The user is sharing a recipient note.","params":{"message":"Her style leans minimalist with clean office decor"}}',
+                    guard_content='{"should_persist":true,"kind":"profile_fact","reason":"This is a stable recipient style note that should be remembered."}',
+                )
+            )
+            orchestrator = KaprukaOrchestrator(
+                memory_stack=stack,
+                router=router,
+                catalog_agent=CatalogAgent(memory_stack=stack, chat_service=FakeChatService()),
+            )
+
+            response = orchestrator.handle_message(
+                "Her style leans minimalist with clean office decor",
+                recipient_id="girlfriend",
+                recipient_name="Girlfriend",
+                relationship="partner",
+            )
+
+            profile = stack.get_recipient_profile("girlfriend")
+            assert profile is not None
+            self.assertEqual(response.route, "preference_update")
+            self.assertIn("updated girlfriend's profile", response.answer.lower())
+            self.assertIn("her style leans minimalist with clean office decor", [note.lower() for note in profile.notes])
+
+    def test_orchestrator_allows_explicit_note_only_profile_update(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            stack = CognitiveMemoryStack(
+                short_term=ShortTermMemoryStore(use_database=False),
+                long_term=FakeLongTermStore(),
+                semantic=SemanticProfileStore(Path(tmp_dir) / "profiles.json"),
+            )
+            router = KaprukaRouter(
+                llm_client=FakeRouterClient(
+                    '{"intent":"preference_update","confidence":0.96,"reason":"The user is explicitly asking to remember a profile fact.","params":{"message":"Remember that her birthday is on 20th July"}}'
+                )
+            )
+            orchestrator = KaprukaOrchestrator(
+                memory_stack=stack,
+                router=router,
+                catalog_agent=CatalogAgent(memory_stack=stack, chat_service=FakeChatService()),
+            )
+
+            response = orchestrator.handle_message(
+                "Remember that her birthday is on 20th July",
+                recipient_id="girlfriend",
+                recipient_name="Girlfriend",
+                relationship="partner",
+            )
+
+            profile = stack.get_recipient_profile("girlfriend")
+            assert profile is not None
+            self.assertEqual(response.route, "preference_update")
+            self.assertIn("updated girlfriend's profile", response.answer.lower())
+            self.assertIn("her birthday is on 20th july", [note.lower() for note in profile.notes])
+
     def test_router_keeps_wife_id_when_name_is_given(self) -> None:
         recipient = KaprukaRouter(use_llm=False).extract_recipient_reference(
             "My wife Neth's birthday is coming on 20th July"
@@ -646,6 +932,82 @@ class AgentTests(unittest.TestCase):
             self.assertNotIn("avoid tv", response.answer.lower())
             self.assertNotIn("non-tv", response.answer.lower())
             self.assertNotIn("Adarei Teddy", response.answer)
+
+    def test_direct_product_query_clears_catalog_when_no_relevant_matches_exist(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            stack = CognitiveMemoryStack(
+                short_term=ShortTermMemoryStore(use_database=False),
+                long_term=FakeLongTermStore(),
+                semantic=SemanticProfileStore(Path(tmp_dir) / "profiles.json"),
+            )
+            orchestrator = KaprukaOrchestrator(
+                memory_stack=stack,
+                catalog_agent=CatalogAgent(memory_stack=stack, chat_service=FakeChatService()),
+            )
+
+            response = orchestrator.handle_message("what are your options in led tvs")
+
+            catalog_output = response.specialist_output["catalog"]
+            self.assertEqual(catalog_output["bundle"]["catalog_matches"], [])
+            self.assertEqual(catalog_output["bundle"]["product_relevance_filter"]["category"], "tv")
+            self.assertEqual(catalog_output["bundle"]["product_relevance_filter"]["removed_count"], 1)
+            self.assertIn("could not find a strong product match", response.answer.lower())
+            self.assertNotIn("Ferrero Rocher Heart Bouquet For Her", response.answer)
+
+    def test_answer_reflection_rejects_irrelevant_furniture_response(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            stack = CognitiveMemoryStack(
+                short_term=ShortTermMemoryStore(use_database=False),
+                long_term=FakeLongTermStore(),
+                semantic=SemanticProfileStore(Path(tmp_dir) / "profiles.json"),
+            )
+            orchestrator = KaprukaOrchestrator(
+                memory_stack=stack,
+                catalog_agent=CatalogAgent(
+                    memory_stack=stack,
+                    chat_service=FakeFurnitureHallucinatingChatService(),
+                ),
+            )
+
+            response = orchestrator.handle_message("what furniture options do you have")
+
+            catalog_output = response.specialist_output["catalog"]
+            answer_validation = catalog_output["reflection"]["answer_validation"]
+            self.assertTrue(answer_validation["checked"])
+            self.assertEqual(answer_validation["source"], "llm_judge")
+            self.assertTrue(answer_validation["answer_revised"])
+            self.assertEqual(answer_validation["requested_terms"], ["furniture"])
+            self.assertIn("Ferrero Rocher Heart Bouquet For Her", answer_validation["mentioned_products"])
+            self.assertEqual(catalog_output["bundle"]["catalog_matches"], [])
+            self.assertIn("could not find a strong product match", response.answer.lower())
+            self.assertIn("answer_reflection_loop", response.timings_ms)
+
+    def test_answer_reflection_does_not_block_broad_gift_discovery_query(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            stack = CognitiveMemoryStack(
+                short_term=ShortTermMemoryStore(use_database=False),
+                long_term=FakeLongTermStore(),
+                semantic=SemanticProfileStore(Path(tmp_dir) / "profiles.json"),
+            )
+            orchestrator = KaprukaOrchestrator(
+                memory_stack=stack,
+                catalog_agent=CatalogAgent(
+                    memory_stack=stack,
+                    chat_service=FakeFatherGiftChatService(),
+                ),
+            )
+
+            response = orchestrator.handle_message("okay also i need a present to give to my father what can you suggest?")
+
+            catalog_output = response.specialist_output["catalog"]
+            answer_validation = catalog_output["reflection"]["answer_validation"]
+            self.assertTrue(answer_validation["checked"])
+            self.assertEqual(answer_validation["source"], "llm_judge")
+            self.assertFalse(answer_validation["answer_revised"])
+            self.assertTrue(answer_validation["answer_supported"])
+            self.assertIn("broad gift-discovery", answer_validation["reason"].lower())
+            self.assertIn("Ferrero Rocher Heart Bouquet For Her", response.answer)
+            self.assertNotIn("could not find a strong product match", response.answer.lower())
 
 
 if __name__ == "__main__":

@@ -26,6 +26,69 @@ class CatalogAgentResult:
 class CatalogAgent:
     """Use the 3-tier memory stack to retrieve and explain catalog results."""
 
+    ANSWER_REVIEW_STOPWORDS = {
+        "a",
+        "an",
+        "and",
+        "are",
+        "available",
+        "birthday",
+        "buy",
+        "can",
+        "catalog",
+        "do",
+        "father",
+        "find",
+        "for",
+        "gift",
+        "gifts",
+        "have",
+        "hello",
+        "help",
+        "hi",
+        "i",
+        "in",
+        "interest",
+        "interested",
+        "is",
+        "it",
+        "looking",
+        "me",
+        "my",
+        "of",
+        "on",
+        "option",
+        "options",
+        "please",
+        "price",
+        "prices",
+        "present",
+        "presents",
+        "recommend",
+        "romantic",
+        "searching",
+        "show",
+        "some",
+        "suggest",
+        "surprise",
+        "that",
+        "the",
+        "these",
+        "this",
+        "to",
+        "want",
+        "what",
+        "wife",
+        "with",
+        "you",
+        "your",
+        "okay",
+        "ok",
+        "also",
+        "need",
+        "suggest",
+    }
+
     def __init__(
         self,
         memory_stack: CognitiveMemoryStack,
@@ -127,6 +190,10 @@ class CatalogAgent:
         answer_started_at = time.perf_counter()
         answer = self._answer(query=query, bundle=bundle)
         answer_ms = int((time.perf_counter() - answer_started_at) * 1000)
+        answer_reflection_started_at = time.perf_counter()
+        reflection = self._reflect_on_answer(query=query, bundle=bundle, reflection=reflection, answer=answer)
+        answer = str(reflection.get("final_answer", answer))
+        answer_reflection_ms = int((time.perf_counter() - answer_reflection_started_at) * 1000)
 
         return CatalogAgentResult(
             query=query,
@@ -145,12 +212,15 @@ class CatalogAgent:
                 "reflection_loop": reflection_ms,
                 "catalog_retrieval": retrieval_ms,
                 "catalog_answer_generation": answer_ms,
+                "answer_reflection_loop": answer_reflection_ms,
             },
         )
 
     def _answer(self, query: str, bundle: Dict[str, object]) -> str:
         relevance_filter = bundle.get("product_relevance_filter")
         catalog_matches = bundle.get("catalog_matches", [])
+        if not catalog_matches:
+            return "I could not find a strong product match in the current catalog."
         if (
             isinstance(relevance_filter, dict)
             and relevance_filter.get("applied")
@@ -158,21 +228,12 @@ class CatalogAgent:
         ):
             return self._format_direct_product_answer(bundle=bundle)
 
-        service = self.chat_service
-        if service is None:
-            try:
-                service = OpenAIChatService()
-            except Exception:
-                service = None
-
+        service = self._get_chat_service()
         if service is not None:
             try:
                 return service.answer_query(query=query, bundle=bundle)
             except Exception:
                 pass
-
-        if not catalog_matches:
-            return "I could not find a strong product match in the current catalog."
 
         return self._format_direct_product_answer(bundle=bundle, title="Top matching products:")
 
@@ -238,6 +299,189 @@ class CatalogAgent:
             "revised": bool(violations),
         }
 
+    def _reflect_on_answer(
+        self,
+        query: str,
+        bundle: Dict[str, object],
+        reflection: Dict[str, object],
+        answer: str,
+    ) -> Dict[str, object]:
+        """Validate that the final answer recommends products directly supported by the request."""
+        reviewed_answer = answer or ""
+        validation = self._judge_answer_relevance(query=query, bundle=bundle, answer=reviewed_answer)
+        if validation is None:
+            validation = self._heuristic_answer_validation(query=query, bundle=bundle, answer=reviewed_answer)
+
+        reviewed_answer = self._apply_answer_validation(bundle=bundle, answer=reviewed_answer, validation=validation)
+        reflection["answer_validation"] = validation
+        reflection["final_answer"] = reviewed_answer
+        return reflection
+
+    def _judge_answer_relevance(
+        self,
+        query: str,
+        bundle: Dict[str, object],
+        answer: str,
+    ) -> Optional[Dict[str, object]]:
+        service = self._get_chat_service()
+        if service is None or not hasattr(service, "judge_answer_relevance"):
+            return None
+
+        try:
+            result = service.judge_answer_relevance(query=query, bundle=bundle, answer=answer)
+        except Exception:
+            return None
+
+        if not isinstance(result, dict):
+            return None
+
+        supported_products = [str(name) for name in result.get("supported_products", [])]
+        unsupported_products = [str(name) for name in result.get("unsupported_products", [])]
+        mentioned_products = [str(name) for name in result.get("mentioned_products", [])]
+        if not mentioned_products:
+            mentioned_products = supported_products + [
+                name for name in unsupported_products if name not in supported_products
+            ]
+
+        relevant = bool(result.get("relevant", False))
+        return {
+            "checked": True,
+            "source": "llm_judge",
+            "reason": str(result.get("reason", "")).strip() or "The LLM judge reviewed the draft answer.",
+            "confidence": float(result.get("confidence", 0.0) or 0.0),
+            "requested_terms": self._requested_answer_terms(query),
+            "mentioned_products": mentioned_products,
+            "supported_products": supported_products,
+            "unsupported_products": unsupported_products,
+            "answer_revised": not relevant,
+            "answer_supported": relevant,
+        }
+
+    def _heuristic_answer_validation(
+        self,
+        query: str,
+        bundle: Dict[str, object],
+        answer: str,
+    ) -> Dict[str, object]:
+        requested_terms = self._requested_answer_terms(query)
+        if not self._should_validate_answer_relevance(query):
+            return {
+                "checked": False,
+                "source": "heuristic_fallback",
+                "reason": "The query is broad gift discovery, so strict answer-term validation is skipped.",
+                "confidence": 0.0,
+                "requested_terms": requested_terms,
+                "mentioned_products": [],
+                "supported_products": [],
+                "unsupported_products": [],
+                "answer_revised": False,
+                "answer_supported": True,
+            }
+        if not requested_terms:
+            return {
+                "checked": False,
+                "source": "heuristic_fallback",
+                "reason": "No strict product terms were detected in the query.",
+                "confidence": 0.0,
+                "requested_terms": [],
+                "mentioned_products": [],
+                "supported_products": [],
+                "unsupported_products": [],
+                "answer_revised": False,
+                "answer_supported": True,
+            }
+
+        catalog_matches = list(bundle.get("catalog_matches", []))
+        mentioned_products = self._mentioned_catalog_products(answer=answer, catalog_matches=catalog_matches)
+        if not mentioned_products:
+            return {
+                "checked": True,
+                "source": "heuristic_fallback",
+                "reason": "The answer did not explicitly mention catalog product names.",
+                "confidence": 0.0,
+                "requested_terms": requested_terms,
+                "mentioned_products": [],
+                "supported_products": [],
+                "unsupported_products": [],
+                "answer_revised": False,
+                "answer_supported": True,
+            }
+
+        category = ""
+        relevance_filter = bundle.get("product_relevance_filter")
+        if isinstance(relevance_filter, dict):
+            category = str(relevance_filter.get("category", ""))
+
+        supported_products = []
+        unsupported_products = []
+        for match in catalog_matches:
+            product = match.get("product", {})
+            product_name = str(product.get("name", ""))
+            if product_name not in mentioned_products:
+                continue
+            product_text = " ".join(
+                str(product.get(key, ""))
+                for key in ("name", "description", "url")
+            )
+            if self._product_supports_answer_terms(product_text, requested_terms, category):
+                supported_products.append(product_name)
+            else:
+                unsupported_products.append(product_name)
+
+        revised = bool(unsupported_products)
+        return {
+            "checked": True,
+            "source": "heuristic_fallback",
+            "reason": (
+                "The answer mentioned products that do not match the requested terms."
+                if revised
+                else "The answer stayed aligned with the requested terms."
+            ),
+            "confidence": 0.0,
+            "requested_terms": requested_terms,
+            "mentioned_products": mentioned_products,
+            "supported_products": supported_products,
+            "unsupported_products": unsupported_products,
+            "answer_revised": revised,
+            "answer_supported": not revised,
+        }
+
+    def _apply_answer_validation(
+        self,
+        bundle: Dict[str, object],
+        answer: str,
+        validation: Dict[str, object],
+    ) -> str:
+        if not validation.get("checked") or validation.get("answer_supported"):
+            return answer
+
+        supported_products = {
+            str(name)
+            for name in validation.get("supported_products", [])
+            if str(name).strip()
+        }
+        if supported_products:
+            bundle["catalog_matches"] = [
+                match
+                for match in list(bundle.get("catalog_matches", []))
+                if str(match.get("product", {}).get("name", "")) in supported_products
+            ]
+        else:
+            bundle["catalog_matches"] = []
+
+        if bundle.get("catalog_matches"):
+            return self._format_direct_product_answer(bundle=bundle)
+        return "I could not find a strong product match in the current catalog."
+
+    def _get_chat_service(self) -> Optional[Any]:
+        service = self.chat_service
+        if service is not None:
+            return service
+        try:
+            return OpenAIChatService()
+        except Exception:
+            return None
+
     def _enforce_direct_product_relevance(self, query: str, bundle: Dict[str, object]) -> Dict[str, object]:
         """For explicit product-category queries, remove unrelated catalog matches."""
         category = self._requested_product_category(query)
@@ -263,14 +507,13 @@ class CatalogAgent:
             else:
                 removed.append(product.get("name", ""))
 
-        if kept:
-            bundle["catalog_matches"] = kept
+        bundle["catalog_matches"] = kept
 
         return {
             "applied": True,
             "category": category,
-            "removed_count": len(removed) if kept else 0,
-            "removed_products": removed if kept else [],
+            "removed_count": len(removed),
+            "removed_products": removed,
         }
 
     def _requested_product_category(self, query: str) -> str:
@@ -333,3 +576,47 @@ class CatalogAgent:
         for match in re.finditer(r"\b(?:peanuts?|nuts?|gluten|dairy|egg|eggs|seafood|fish)\b", normalized):
             terms.add(match.group(0))
         return terms
+
+    def _requested_answer_terms(self, query: str) -> List[str]:
+        requested_terms = []
+        seen = set()
+        for token in re.findall(r"[a-z0-9]+", query.lower()):
+            normalized = token[:-1] if token.endswith("s") and len(token) > 3 else token
+            if normalized in self.ANSWER_REVIEW_STOPWORDS or len(normalized) <= 1 or normalized in seen:
+                continue
+            seen.add(normalized)
+            requested_terms.append(normalized)
+        return requested_terms
+
+    def _mentioned_catalog_products(self, answer: str, catalog_matches: List[Dict[str, object]]) -> List[str]:
+        mentioned = []
+        answer_lower = answer.lower()
+        for match in catalog_matches:
+            product = match.get("product", {})
+            product_name = str(product.get("name", ""))
+            if product_name and product_name.lower() in answer_lower:
+                mentioned.append(product_name)
+        return mentioned
+
+    def _product_supports_answer_terms(
+        self,
+        product_text: str,
+        requested_terms: List[str],
+        category: str,
+    ) -> bool:
+        if category and self._product_matches_category(product_text, category):
+            return True
+
+        normalized = product_text.lower()
+        return any(term in normalized for term in requested_terms)
+
+    def _should_validate_answer_relevance(self, query: str) -> bool:
+        if self.memory_stack.is_direct_product_query(query):
+            return True
+
+        query_tokens = set(re.findall(r"[a-z0-9]+", query.lower()))
+        gift_context = getattr(self.memory_stack, "GIFT_CONTEXT_KEYWORDS", set())
+        if query_tokens & gift_context:
+            return False
+
+        return True
